@@ -1,0 +1,52 @@
+# History files
+.Rhistory
+.Rapp.history
+
+# Session Data files
+.RData
+.RDataTmp
+
+# User-specific files
+.Ruserdata
+
+# RStudio files
+.Rproj.user/
+
+# Large data files - adjust these based on your actual data
+*.csv
+*.xlsx
+*.xls
+*.zip
+*.rds
+*.RDS
+
+# Output files you can regenerate
+*.pdf
+*.png
+*.jpg
+*.jpeg
+
+# System files
+.DS_Store
+Thumbs.db
+# Geographic and spatial data files
+*.RData
+*.rds
+*.RDS
+*.tif
+*.TIF
+*.tiff
+*.TIFF
+*.gpkg
+*.shp
+*.dbf
+*.prj
+*.shx
+*.sbn
+*.sbx
+*.cpg
+*.tfw
+*.ovr
+*.nc
+*.grd
+*.gri
