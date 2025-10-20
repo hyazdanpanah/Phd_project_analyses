@@ -1,0 +1,442 @@
+---
+title: "Forestry Exposure in the Saguenay Fjord"
+author: "Hediyeh Yazdanpanah"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    code_folding: show
+    highlight: pygments
+    theme: yeti
+    toc: TRUE
+    toc_depth: 4
+    toc_float:
+      collapsed: TRUE
+      smooth_scroll: TRUE
+    df_print: paged
+    fig_caption: TRUE
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  warning = TRUE,
+  message = TRUE,
+  error = TRUE,
+  fig.width = 10,
+  fig.height = 8
+)
+
+# Load required packages
+library(sf)
+library(dplyr)
+library(raster)
+library(gdistance)
+library(RColorBrewer)
+
+# Source shared functions
+source("00_shared_functions.R")
+```
+
+# Introduction
+
+The Saguenay Fjord is one of the world's southernmost fjords and a critical marine ecosystem supporting diverse wildlife, including the endangered St. Lawrence beluga whale population. The surrounding watersheds, located in Quebec's temperate-boreal forest transition zone, have experienced extensive forestry activities that may influence fjord water quality through soil erosion, sediment transport, and altered hydrology.
+
+This analysis quantifies the potential environmental impact of forestry activities on the Saguenay Fjord through a watershed-based exposure model.
+
+## Methodology Overview
+
+1. **Watershed-Scale Aggregation**: Forestry impacts aggregated at the watershed scale
+2. **River Mouth Sources**: Impact sources placed at hydrologically-accurate river mouth locations
+3. **Temporal Weighting**: Based on boreal forest recovery timelines (Palviainen et al., 2015)
+4. **Nitrogen Impact Assessment**: Using empirical data from boreal catchment studies
+
+# Data Loading
+
+## Base Data
+
+```{r load-base-data}
+# Load watersheds, bathymetry, and water mask using shared function
+base_data <- load_base_data()
+
+watersheds <- base_data$watersheds
+bathy_200 <- base_data$bathy_200
+water_mask <- base_data$water_mask
+water_sf <- base_data$water_sf
+```
+
+## Forestry Data
+
+```{r load-forestry-data}
+# Load forestry intervention data
+# Sampling 1000 records per year for computational efficiency
+forestry_data <- st_read("INTERV_FORES_PROV.gpkg",
+                        query = "SELECT exercice, superficie, geom
+                                FROM (
+                                 SELECT exercice, superficie, geom,
+                                 ROW_NUMBER() OVER (PARTITION BY exercice ORDER BY RANDOM()) as rn
+                                 FROM 'INTERV_FORES_PROV'
+                                   WHERE exercice >= 1980
+                               )
+                                WHERE rn <= 1000",
+                        quiet = TRUE)
+
+# Transform to UTM
+forestry_utm <- st_transform(forestry_data, crs = target_crs)
+```
+
+# River Mouth Detection
+
+```{r find-river-mouths}
+# Find river mouth locations using shared function
+river_mouths_sf <- find_river_mouths(watersheds, water_sf)
+```
+
+```{r plot-river-mouths, fig.cap="River mouth locations where watersheds enter the Saguenay Fjord"}
+# Visualize river mouths and watersheds
+plot_river_mouths_diagnostic(watersheds, river_mouths_sf, water_sf,
+                            xmin, xmax, ymin, ymax)
+```
+
+# Forestry Impact Assessment
+
+## Nitrogen Impact Functions
+
+Based on Palviainen et al. (2015) cumulative nitrogen export model:
+
+```{r forestry-intensity-functions}
+# Forestry intensity index using Table 3 cumulative approach
+get_forestry_intensity_index <- function(years_since, proportion_logged_percent) {
+  # Table 3 parameters for Total N (10-year coefficients)
+  aj <- 1.01
+  
+  table3_coefficients <- c(
+    154.64,   # Year 1
+    205.48,   # Year 2
+    460.75,   # Year 3 (peak)
+    377.40,   # Year 4
+    465.08,   # Year 5 (peak)
+    162.96,   # Year 6
+    128.99,   # Year 7
+    47.44,    # Year 8
+    -32.85,   # Year 9 (recovery)
+    -51.25    # Year 10 (recovery)
+  )
+  
+  # Input validation
+  if (is.na(years_since) || years_since <= 0 || 
+      is.na(proportion_logged_percent) || proportion_logged_percent <= 0) {
+    return(0)
+  }
+  
+  # Cap at 100% and convert to decimal
+  if (proportion_logged_percent > 100) proportion_logged_percent <- 100
+  proportion_decimal <- proportion_logged_percent / 100
+  
+  # Cumulative approach: sum impacts from all years since logging
+  cumulative_impact <- aj
+  years_to_include <- min(round(years_since), 10)
+  
+  for (year in 1:years_to_include) {
+    cumulative_impact <- cumulative_impact + 
+      (table3_coefficients[year] * proportion_decimal)
+  }
+  
+  return(cumulative_impact)
+}
+```
+
+## Process Watershed Forestry Data
+
+```{r process-watershed-forestry}
+process_watershed_forestry <- function(watershed_name) {
+  watershed <- watersheds[watersheds$RIVER_NAME == watershed_name, ]
+  
+  if (nrow(watershed) == 0) {
+    return(NULL)
+  }
+  
+  watershed_area_ha <- as.numeric(st_area(watershed)) / 10000
+  
+  # Ensure CRS match
+  if (!identical(st_crs(forestry_utm), st_crs(watershed))) {
+    watershed <- st_transform(watershed, st_crs(forestry_utm))
+  }
+  
+  # Crop forestry data to watershed
+  tryCatch({
+    watershed <- st_make_valid(watershed)
+    forestry_utm_valid <- st_make_valid(forestry_utm)
+    
+    watershed_forestry <- st_intersection(forestry_utm_valid, watershed)
+  }, error = function(e) {
+    return(data.frame(
+      RIVER_NAME = watershed_name,
+      total_forestry_intensity = 0,
+      forestry_intensity_index = 0,
+      count_interventions = 0,
+      total_logged_area = 0,
+      proportion_logged = 0,
+      watershed_area_ha = watershed_area_ha
+    ))
+  })
+  
+  if (nrow(watershed_forestry) == 0) {
+    return(data.frame(
+      RIVER_NAME = watershed_name,
+      total_forestry_intensity = 0,
+      forestry_intensity_index = 0,
+      count_interventions = 0,
+      total_logged_area = 0,
+      proportion_logged = 0,
+      watershed_area_ha = watershed_area_ha
+    ))
+  }
+  
+  # Calculate forestry impacts
+  watershed_forestry <- watershed_forestry %>%
+    mutate(
+      exercice_num = as.numeric(exercice),
+      years_since = 2024 - exercice_num,
+      intersection_area = as.numeric(st_area(.)) / 10000
+    )
+  
+  # Group by logging year
+  yearly_impacts <- watershed_forestry %>%
+    st_drop_geometry() %>%
+    group_by(years_since) %>%
+    summarise(
+      yearly_logged_area = sum(intersection_area, na.rm = TRUE),
+      .groups = 'drop'
+    ) %>%
+    mutate(
+      yearly_proportion = (yearly_logged_area / watershed_area_ha) * 100,
+      cumulative_intensity = mapply(get_forestry_intensity_index, 
+                                   years_since, yearly_proportion),
+      weighted_intensity = cumulative_intensity * (yearly_logged_area / watershed_area_ha)
+    )
+  
+  # Calculate overall watershed forestry intensity
+  total_weighted_intensity <- sum(yearly_impacts$weighted_intensity, na.rm = TRUE)
+  total_proportion <- (sum(yearly_impacts$yearly_logged_area, na.rm = TRUE) / 
+                      watershed_area_ha) * 100
+  
+  # Weighted average years since logging
+  if (sum(yearly_impacts$yearly_logged_area, na.rm = TRUE) > 0) {
+    weighted_avg_years <- sum(yearly_impacts$years_since * 
+                             yearly_impacts$yearly_logged_area, na.rm = TRUE) /
+                          sum(yearly_impacts$yearly_logged_area, na.rm = TRUE)
+  } else {
+    weighted_avg_years <- 0
+  }
+  
+  # Alternative calculation
+  if (total_proportion > 0 && weighted_avg_years > 0) {
+    alternative_intensity <- get_forestry_intensity_index(weighted_avg_years, 
+                                                          total_proportion)
+  } else {
+    alternative_intensity <- 0
+  }
+  
+  final_intensity <- max(total_weighted_intensity, alternative_intensity, na.rm = TRUE)
+  
+  # Normalize intensity index (0-1)
+  max_calibration <- 500
+  intensity_index <- min(1, max(0, final_intensity / max_calibration))
+  
+  # Return summary
+  watershed_summary <- data.frame(
+    RIVER_NAME = watershed_name,
+    total_forestry_intensity = final_intensity,
+    forestry_intensity_index = intensity_index,
+    count_interventions = nrow(watershed_forestry),
+    total_logged_area = sum(yearly_impacts$yearly_logged_area, na.rm = TRUE),
+    proportion_logged = total_proportion,
+    weighted_avg_years_since = weighted_avg_years,
+    watershed_area_ha = watershed_area_ha,
+    max_single_year_impact = max(yearly_impacts$cumulative_intensity, na.rm = TRUE),
+    years_with_logging = nrow(yearly_impacts)
+  )
+  
+  return(watershed_summary)
+}
+```
+
+## Calculate Watershed Forestry Intensity
+
+```{r calculate-forestry-intensity}
+# Process all watersheds
+watershed_forestry_summary <- data.frame()
+
+for (river_name in unique(watersheds$RIVER_NAME)) {
+  summary <- process_watershed_forestry(river_name)
+  if (!is.null(summary)) {
+    watershed_forestry_summary <- rbind(watershed_forestry_summary, summary)
+  }
+}
+```
+
+```{r forestry-summary-table}
+# Display summary table
+knitr::kable(
+  watershed_forestry_summary %>%
+    select(RIVER_NAME, proportion_logged, forestry_intensity_index, 
+           weighted_avg_years_since, count_interventions) %>%
+    arrange(desc(forestry_intensity_index)) %>%
+    head(10),
+  caption = "Top 10 Watersheds by Forestry Intensity Index",
+  digits = 3,
+  col.names = c("Watershed", "% Logged", "Intensity Index", 
+                "Avg Years Since", "# Interventions")
+)
+```
+
+## Prepare River Mouth Sources
+
+```{r prepare-river-sources}
+# Merge forestry data with river mouths
+river_mouth_sources <- merge(river_mouths_sf, watershed_forestry_summary,
+                             by = "RIVER_NAME", all.x = TRUE)
+
+# Handle watersheds with no forestry data
+river_mouth_sources$total_forestry_intensity[
+  is.na(river_mouth_sources$total_forestry_intensity)] <- 0
+river_mouth_sources$forestry_intensity_index[
+  is.na(river_mouth_sources$forestry_intensity_index)] <- 0
+
+# Filter active sources
+river_mouth_sources_active <- river_mouth_sources[
+  river_mouth_sources$forestry_intensity_index > 0, ]
+
+# Rename for consistency
+names(river_mouth_sources_active)[
+  names(river_mouth_sources_active) == "forestry_intensity_index"] <- "intensity_index"
+```
+
+```{r forestry-stats}
+# Summary statistics
+cat("=== FORESTRY INTENSITY STATISTICS ===\n")
+cat("Total watersheds processed:", nrow(watershed_forestry_summary), "\n")
+cat("Watersheds with forestry activity:", nrow(river_mouth_sources_active), "\n")
+cat("Mean intensity index:", 
+    round(mean(river_mouth_sources_active$intensity_index, na.rm = TRUE), 3), "\n")
+cat("Max intensity index:", 
+    round(max(river_mouth_sources_active$intensity_index, na.rm = TRUE), 3), "\n")
+```
+
+# Exposure Calculation
+
+## Setup Grid and Transition Layer
+
+```{r setup-exposure}
+# Create grid system
+grid_system <- create_grid_system(xmin, ymin, xmax, ymax, grid_res = 200)
+grid_points_sf <- grid_system$grid_points_sf
+grid_polygons_sf <- grid_system$grid_polygons_sf
+
+# Create transition layer
+tr_bathy <- create_transition_layer(bathy_200)
+
+# Create template raster
+template_raster <- raster(raster::extent(bathy_200), 
+                         resolution = 200,
+                         crs = projection(bathy_200))
+```
+
+## Calculate Weighted Forestry Exposure
+
+```{r calculate-forestry-exposure}
+decay_type <- "III"
+
+# Calculate exposure for each river mouth separately
+river_exposures <- list()
+
+for(i in 1:nrow(river_mouth_sources_active)) {
+  river_name <- river_mouth_sources_active$RIVER_NAME[i]
+  intensity <- river_mouth_sources_active$intensity_index[i]
+  
+  # Calculate exposure for this single river mouth
+  single_exposure <- RelativeExposure(
+    source = river_mouth_sources_active[i,],
+    transition = tr_bathy,
+    decay_type = decay_type,
+    grid_points_sf = grid_points_sf,
+    empty_raster = template_raster
+  )
+  
+  # Weight by intensity index
+  river_exposures[[i]] <- single_exposure * intensity
+}
+
+# Combine all weighted exposures
+forestry_exp <- Reduce('+', river_exposures)
+
+# Normalize to 0-1 scale
+max_value <- cellStats(forestry_exp, stat = "max", na.rm = TRUE)
+forestry_exp <- forestry_exp / max_value
+
+# Apply water mask
+forestry_exp <- mask(forestry_exp, water_mask < 0)
+forestry_exp[forestry_exp == 0] <- NA
+```
+
+```{r exposure-stats}
+cat("=== FORESTRY EXPOSURE STATISTICS ===\n")
+cat("Max exposure value:", round(max_value, 6), "\n")
+cat("Mean exposure:", 
+    round(cellStats(forestry_exp, "mean", na.rm=TRUE), 6), "\n")
+cat("Non-NA cells:", sum(!is.na(values(forestry_exp))), "\n")
+```
+
+# Results Visualization
+
+```{r plot-forestry-exposure, fig.cap="Forestry exposure in Saguenay Fjord using Level III decay"}
+plot_exposure(forestry_exp, 
+              "Forestry Exposure - Watershed-based (Level III)",
+              xmin, xmax, ymin, ymax)
+```
+
+# Save Results
+
+```{r save-results}
+# Save exposure raster and metadata
+save(forestry_exp, 
+     river_mouth_sources_active, 
+     watershed_forestry_summary,
+     file = "forestry_exposure.RData")
+
+# Export as GeoTIFF
+writeRaster(forestry_exp, 
+            filename = "forestry_exposure.tif", 
+            overwrite = TRUE)
+```
+
+# Summary
+
+This forestry exposure analysis successfully developed a watershed-based model to quantify terrestrial forestry impacts on the Saguenay Fjord ecosystem:
+
+**Key Features:**
+
+- **Hydrologically-Accurate**: River mouth sources precisely located where terrestrial inputs enter the fjord
+- **Empirical Nitrogen Loading**: Utilizes peer-reviewed data from Palviainen et al. (2015) for boreal forest watersheds
+- **Watershed-Scale Aggregation**: Forestry impacts aggregated at watershed scale for realistic cumulative effects
+- **Temporal Dynamics**: 10-year recovery timeline with peak impacts in years 3-5 post-harvest
+
+**Results:**
+
+- **`r nrow(river_mouth_sources_active)`** watersheds with active forestry impacts
+- **`r round(mean(river_mouth_sources_active$proportion_logged, na.rm=TRUE), 1)`%** mean proportion logged across active watersheds
+- **Level III decay** function applied for exposure gradient calculation
+
+# References
+
+Palviainen, M., Finér, L., Laurén, A., Mattsson, T., & Högbom, L. (2015). A method to estimate the impact of clear-cutting on nutrient concentrations in boreal headwater streams. *AMBIO*, 44(7), 521-535.
+
+Kreutzweiser, D. P., Capell, S. S., & Good, K. P. (2008). Logging impacts on the biogeochemistry of boreal forest soils and nutrient export to aquatic systems: A review. *Canadian Journal of Forest Research*, 38, 2223-2236.
+
+---
+
+**Session Info:**
+
+```{r session-info}
+sessionInfo()
+```

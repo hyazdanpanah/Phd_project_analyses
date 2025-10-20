@@ -1,0 +1,579 @@
+---
+title: "Coastal Development"
+author: 
+- Hediyeh Yazdanpanah
+- Frederic Maps 
+date: "2025-05-21"
+output: 
+  html_document:
+    code_folding : show
+    highlight    : pygments
+    theme        : yeti
+    toc          : TRUE
+    toc_depth    : 4
+    toc_float:
+      collapsed     : TRUE
+      smooth_scroll : TRUE
+    df_print     : paged
+    fig_caption  : TRUE
+---
+# Coastal Development Assessment
+
+## Introduction to Nightlight Data as Development Proxy
+
+Coastal development intensity within the study area was assessed using **nightlight satellite data** as a proxy for human settlement density and infrastructure development. This approach follows established methodologies that use artificial nighttime illumination to quantify the spatial extent and intensity of coastal urbanization (Halpern et al., 2008). The nightlight data were obtained from **raster datasets** provided by Halpern and accessed through the <a href="https://knb.ecoinformatics.org/view/doi:10.5063/F19Z92TW">Knowledge Network for Bioinformatics repository</a>.
+
+## Data Processing and Coastal Zone Definition
+
+**Nightlight Data Preparation**
+
+The nightlight raster data were processed to focus specifically on coastal development impacts. Raw nightlight intensity values were resampled to **200m resolution** to match the spatial resolution of other stressor layers in the cumulative impact assessment.
+
+**Coastal Buffer Zone**
+
+To identify areas where coastal development would most directly impact marine ecosystems, we applied a **coastal buffer approach**. The shoreline was defined using the **0-meter bathymetric contour**, and buffer zones were established at distances of:
+
+* **500m from shoreline** for extended coastal influence assessment
+
+This buffer approach ensures that only nightlight sources in proximity to marine environments are considered as potential stressors to benthic communities.
+
+## Light Source Identification and Thresholding
+
+**Intensity-Based Source Selection**
+
+Within the coastal buffer zones, light sources were identified using **quantile-based thresholds** to focus on areas of significant development intensity:
+
+* **85th percentile threshold** (top 15% of light intensity) for high-intensity development
+* **75th percentile threshold** (top 25% of light intensity) for moderate-intensity development
+
+This approach excludes low-level background illumination while capturing areas of concentrated human activity that are most likely to generate significant environmental impacts.
+
+**Binary Source Classification**
+
+Light intensity values above the selected threshold were classified as **active development sources** (value = 1), while areas below the threshold were excluded from analysis (value = NA). This binary classification simplifies subsequent exposure modeling while maintaining focus on the most impactful development areas.
+
+## Point Source Conversion and Optimization
+
+**Raster-to-Point Transformation**
+
+Unlike point-source stressors such as wastewater treatment plants, nightlight data exists as continuous raster surfaces. To apply consistent exposure modeling approaches, the classified light source raster was **converted to point sources** through the following process:
+
+* **Aggregation** by a factor of 2 to reduce computational load
+* **Raster-to-points conversion** retaining only cells with development sources
+* **Coordinate transformation** to match the study area projection
+
+**Computational Optimization**
+
+To ensure efficient processing while maintaining analytical rigor, the number of source points was **limited to a maximum of 50 points** through random sampling when necessary. This optimization maintains spatial representation of coastal development patterns while enabling practical exposure calculations.
+
+## Water-Focused Exposure Modeling
+
+**Marine Environment Targeting**
+
+Coastal development exposure calculations were restricted to **water areas only**, as determined by negative bathymetric values. This approach recognizes that coastal development impacts on marine ecosystems occur primarily through:
+
+* **Light pollution** affecting marine organisms
+* **Runoff and sedimentation** from developed areas
+* **Chemical contamination** from urban sources
+* **Physical habitat alteration** near shorelines
+
+**Simplified Transition Function**
+
+A streamlined transition function was developed for coastal development effects in marine environments:
+
+* **Full conductance (1.0)** within water areas
+* **No conductance (0.0)** through land areas
+
+This function assumes that coastal development effects propagate efficiently through water but are blocked by terrestrial barriers.
+
+
+## Methodological Advantages
+
+This nightlight-based approach to coastal development assessment provides several advantages:
+
+* **Consistent spatial coverage** across the entire study area
+* **Objective quantification** of development intensity
+* **Computational efficiency** through optimized processing
+* **Direct linkage** between human activity and potential marine impacts
+
+we take account the "nightlight" based on <a href="https://knb.ecoinformatics.org/view/doi:10.5063/F19Z92TW">raster data</a> as coastal development provided by Halpern. 
+
+```{r coastal_development}
+# ==============================
+# Optimized Coastal Light Exposure Analysis
+# ==============================
+
+# ---- Load Libraries ----
+library(terra)
+library(sf)
+library(gdistance)
+library(dplyr)
+library(raster)
+library(ggplot2)
+library(viridis)
+library(RColorBrewer)
+
+# ---- Load Data ----
+# Load night light raster
+light_raster <- raster("nightlights.tif")
+
+# Load bathymetry (for defining water areas)
+bathy <- raster("bathy.tif")
+
+# ---- Set up coordinates and extent ----
+target_crs <- "+proj=utm +zone=19 +datum=WGS84 +units=m +no_defs"
+
+# ---- Define study area extent ----
+xmin <- 345000; ymin <- 5325000
+xmax <- 450000; ymax <- 5370000
+saguenay_extent <- extent(xmin, xmax, ymin, ymax)
+
+# ---- More efficient processing order: crop first, then reproject ----
+# Check if rasters are already in target CRS
+if (projection(light_raster) != target_crs) {
+  # If not in target CRS, first project to target CRS
+  light_utm <- projectRaster(light_raster, crs = target_crs)
+  # Then crop to study area
+  light_crop <- crop(light_utm, saguenay_extent)
+} else {
+  # If already in target CRS, just crop
+  light_crop <- crop(light_raster, saguenay_extent)
+}
+
+# Then resample to 200m resolution
+light_200 <- projectRaster(light_crop,crs = target_crs, res = c(200, 200))
+
+# Same for bathymetry
+if (projection(bathy) != target_crs) {
+  bathy_utm <- projectRaster(bathy, crs = target_crs)
+  bathy_crop <- crop(bathy_utm, saguenay_extent)
+} else {
+  bathy_crop <- crop(bathy, saguenay_extent)
+}
+
+bathy_200 <- projectRaster(bathy_crop, crs = target_crs, res = c(200, 200))
+
+
+# ---- Create water mask (only areas with negative values in bathymetry) ----
+water_mask <- bathy_200
+water_mask[water_mask >= 0] <- NA  # Keep only water areas (negative bathymetry)
+water_mask[water_mask < 0] <- 1    # Set water areas to 1
+
+# ---- Define Shoreline ----
+shoreline <- rasterToContour(bathy_200, levels = 0)
+shoreline_sf <- st_as_sf(shoreline)
+```
+
+# 25% of top light intensity 
+with taking 500 m distance buffer 
+ 
+```{r buffer 500, 25%}
+
+# ---- Define Light Sources (Coastal settlements) ----
+coastal_buffer <- st_buffer(shoreline_sf, dist = 500)
+coastal_buffer_sp <- as(coastal_buffer, "Spatial")
+
+# Filter light data along coast
+light_coastal <- mask(light_200, coastal_buffer_sp)
+
+# Apply threshold but KEEP intensity values
+light_threshold <- quantile(values(light_coastal), probs = 0.75, na.rm = TRUE)
+light_sources <- light_coastal
+light_sources[light_sources < light_threshold] <- NA
+
+# Create binary raster identifying light sources above threshold
+light_sources[light_sources >= light_threshold] <- 1
+```
+
+# run the function and plotting
+Here  we have different data sources, here we have raster data rather than points and polygons. 
+
+```{r for binary approach}
+# Convert to points (fewer points = faster processing)
+# Aggregate first to reduce number of points
+light_sources_agg <- aggregate(light_sources, fact = 2, fun = max)
+light_source_points <- rasterToPoints(light_sources_agg, fun = function(x) x == 1) %>%
+  as.data.frame() %>%
+  st_as_sf(coords = c("x", "y"), crs = target_crs) 
+
+# ---- Define transition layer for water ----
+# We'll modify the transition function to make it work efficiently
+# Only focus on water areas to speed up calculation
+water_bathy <- bathy_200
+water_bathy[water_bathy >= 0] <- NA  # Land areas become NA
+water_bathy[is.na(water_bathy)] <- 0  # Set NA to 0 temporarily for transition
+
+# Simplify transition function for better performance
+fun_water <- function(x) {
+  ifelse(is.na(x[1]) || is.na(x[2]), 0, 1)  # Simple conductance within water
+}
+
+# Create transition layer (only for water areas)
+tr_water <- transition(water_bathy, 
+                       transitionFunction = fun_water,
+                       directions = 8,
+                       symm = FALSE) %>%
+  geoCorrection(., type = "c")
+
+# ---- Create grid for analysis ----
+# Create a modified grid that only includes water areas to speed up processing
+water_polygon_sf <- rasterToPolygons(water_mask, dissolve = TRUE) %>%
+  st_as_sf()
+
+# Create grid points only in water areas for faster calculations
+grid_res <- 200
+grid_water <- st_make_grid(water_polygon_sf, 
+                           cellsize = grid_res, 
+                           what = "centers") %>%
+  st_sf() %>%
+  st_intersection(water_polygon_sf)
+
+# ---- Define RelativeExposure function with performance optimizations ----
+RelativeExposure <- function(source, transition, decay_type, grid_points_sf, empty_raster) {
+  # Verify CRS match
+  if (!identical(st_crs(source), st_crs(grid_points_sf))) {
+    stop("CRS mismatch between source and grid points")
+  }
+  
+  # Optimize by limiting the number of source points (use max 50 points)
+  if (nrow(source) > 50) {
+    # Sample the most important points (to improve performance)
+    source <- source[sample(nrow(source), 50), ]
+  }
+  
+  # Convert sf objects to sp
+  source_sp <- as(source, "Spatial")
+  grid_points_sp <- as(grid_points_sf, "Spatial")
+  
+  # Calculate cost distance
+  cat("Calculating distances...\n")
+  distance <- costDistance(transition, grid_points_sp, source_sp)
+  
+  if (all(is.na(distance))) {
+    stop("All distance values are NA")
+  }
+  
+  # Find minimum distance from each grid point to any source
+  min_dist <- apply(distance, 1, min)
+  
+  # Calculate decay parameter
+  a_param <- switch(decay_type,
+                    "I" = -1,
+                    "II" = -0.1,
+                    "III" = -0.01,
+                    "IV" = -0.001,
+                    stop("Invalid decay type"))
+  
+  # Compute exposure values
+  exposure <- exp(a_param * min_dist)
+  
+  # Create exposure raster
+  cat("Creating final raster...\n")
+  coords <- st_coordinates(grid_points_sf)
+  sp_exposure <- SpatialPointsDataFrame(
+    coords = coords,
+    data = data.frame(exposure = exposure),
+    proj4string = CRS(st_crs(empty_raster)$proj4string)
+  )
+  
+  # Rasterize exposure values
+  exposure_rast <- rasterize(sp_exposure,
+                             empty_raster,
+                             field = "exposure",
+                             fun = mean,
+                             background = NA)
+  
+  # Normalize exposure values
+  max_value <- cellStats(exposure_rast, stat = "max", na.rm = TRUE)
+  exposure_rast[] <- exposure_rast[] / max_value
+  
+  # Ensure exposure only appears in water
+  exposure_rast <- mask(exposure_rast, water_mask)
+  
+  return(exposure_rast)
+}
+
+# ---- Create empty raster template ----
+template_raster <- raster(extent(bathy_200),
+                          resolution = 200,
+                          crs = projection(bathy_200))
+
+# ---- Calculate Light Exposure ----
+# Use a faster decay type for initial results
+cat("Beginning exposure calculation...\n")
+decay_type <- "III"  # Same as your ice fishing analysis
+
+# Calculate light exposure (this may still take some time)
+light_exposure <- RelativeExposure(
+  source = light_source_points,
+  transition = tr_water,
+  decay_type = decay_type,
+  grid_points_sf = grid_water,
+  empty_raster = template_raster
+)
+
+# ---- Save and Plot Results ----
+writeRaster(light_exposure, "coastal_light_exposure_III_binary.tif", overwrite = TRUE)
+
+```
+```{r plot1 }
+
+png("lightIII.png")
+# Create plot with binary approach
+plot(light_exposure, 
+     main = "Coastal Light Exposure (Type III)")
+# Add scale bar
+scalebar(d = 10000,  # distance in meters (adjust based on your map size)
+         xy = NULL,   # NULL = bottom left corner
+         type = "bar",
+         divs = 2,
+         below = "km",
+         label = c(0, 5, 10))
+dev.off()    
+```
+
+
+```{r intensity light index plot}
+# ===============================================================================
+# CONVERT TO POINTS WITH INTENSITY VALUES (NOT BINARY)
+# ===============================================================================
+# Aggregate to reduce points but keep intensity values
+light_sources_agg <- aggregate(light_sources, fact = 2, fun = mean)  # Use mean, not max
+
+# Convert to points WITH intensity values
+light_source_df <- rasterToPoints(light_sources_agg, spatial = FALSE) %>%
+  as.data.frame()
+
+# The third column contains the light intensity values
+colnames(light_source_df) <- c("x", "y", "light_intensity")
+
+# Convert to sf with intensity
+light_source_points <- light_source_df %>%
+  st_as_sf(coords = c("x", "y"), crs = target_crs)
+
+# Calculate intensity index (0-1 scale)
+max_light <- max(light_source_points$light_intensity, na.rm = TRUE)
+light_source_points$intensity_index <- light_source_points$light_intensity / max_light
+
+print(paste("Light source points:", nrow(light_source_points)))
+print(paste("Intensity range:", 
+            round(min(light_source_points$intensity_index), 3), "-",
+            round(max(light_source_points$intensity_index), 3)))
+
+# SMART SAMPLING: KEEP ONLY HIGH-INTENSITY SOURCES (5POINTS)
+# ===============================================================================
+if (nrow(light_source_points) > 5) {
+  print(paste("Reducing from", nrow(light_source_points), "to 5 points..."))
+  
+  # Keep ONLY the top 5 highest intensity sources (cities, not villages)
+  light_source_points <- light_source_points %>% 
+    arrange(desc(intensity_index)) %>% 
+    slice(1:5)
+  
+  print(paste("Kept top 10 high-intensity sources (cities)"))
+  print(paste("Intensity range:", 
+              round(min(light_source_points$intensity_index), 3), "-",
+              round(max(light_source_points$intensity_index), 3)))
+}
+```
+```{r functnction weighting 5 point}
+
+# ===============================================================================
+# INDIVIDUAL INTENSITY WEIGHTING (5 POINTS)
+# ===============================================================================
+water_bathy <- bathy_200
+water_bathy[water_bathy >= 0] <- NA
+water_bathy[is.na(water_bathy)] <- 0
+
+fun_water <- function(x) {
+  ifelse(is.na(x[1]) || is.na(x[2]), 0, 1)
+}
+
+tr_water <- transition(water_bathy,
+                       transitionFunction = fun_water,
+                       directions = 8,
+                       symm = FALSE) %>%
+  geoCorrection(., type = "c")
+
+water_polygon_sf <- rasterToPolygons(water_mask, dissolve = TRUE) %>%
+  st_as_sf()
+
+grid_res <- 200
+grid_water <- st_make_grid(water_polygon_sf,
+                           cellsize = grid_res,
+                           what = "centers") %>%
+  st_sf() %>%
+  st_intersection(water_polygon_sf)
+
+RelativeExposure <- function(source, transition, decay_type, grid_points_sf, empty_raster) {
+  if (!identical(st_crs(source), st_crs(grid_points_sf))) {
+    stop("CRS mismatch")
+  }
+  
+  source_sp <- as(source, "Spatial")
+  grid_points_sp <- as(grid_points_sf, "Spatial")
+  distance <- costDistance(transition, grid_points_sp, source_sp)
+  min_dist <- apply(distance, 1, min)
+  
+  a_param <- switch(decay_type, "I" = -1, "II" = -0.1, "III" = -0.01, "IV" = -0.001)
+  exposure <- exp((0.000025 * a_param) * (min_dist)^2)
+  
+  coords <- st_coordinates(grid_points_sf)
+  sp_exposure <- SpatialPointsDataFrame(coords = coords,
+                                        data = data.frame(exposure = exposure),
+                                        proj4string = CRS(st_crs(empty_raster)$proj4string))
+  
+  exposure_rast <- rasterize(sp_exposure, empty_raster, field = "exposure", fun = mean, background = NA)
+  max_value <- cellStats(exposure_rast, stat = "max", na.rm = TRUE)
+  exposure_rast[] <- exposure_rast[] / max_value
+  exposure_rast <- mask(exposure_rast, water_mask)
+  
+  return(exposure_rast)
+}
+
+template_raster <- raster(extent(bathy_200), resolution = 200, crs = projection(bathy_200))
+decay_type <- "III"
+
+print("Calculating individual intensity-weighted exposures (5 points)...")
+light_exposures <- list()
+
+for (i in 1:nrow(light_source_points)) {
+  print(paste("Processing point", i, "of", nrow(light_source_points), 
+              "- Intensity:", round(light_source_points$intensity_index[i], 3)))
+  
+  intensity <- light_source_points$intensity_index[i]
+  
+  single_exp <- RelativeExposure(
+    source = light_source_points[i,],
+    transition = tr_water,
+    decay_type = decay_type,
+    grid_points_sf = grid_water,
+    empty_raster = template_raster
+  )
+  
+  # Weight by intensity
+  light_exposures[[i]] <- single_exp * intensity
+}
+
+# Combine weighted exposures
+print("Combining weighted exposures...")
+light_exposure <- Reduce('+', light_exposures)
+
+# Normalize
+max_val <- cellStats(light_exposure, stat = "max", na.rm = TRUE)
+light_exposure <- light_exposure / max_val
+light_exposure <- mask(light_exposure, water_mask)
+light_exposure[light_exposure == 0] <- NA
+
+writeRaster(light_exposure, "coastal_light_exposure_IIIt.tif", overwrite = TRUE)
+save(light_exposure, file = "coastal_light_exposure_IIIt.RData")
+
+print("Complete with intensity gradient!")
+print(paste("Max exposure:", round(max_val, 6)))
+
+```
+
+```{r function faster average}
+# ===============================================================================
+# FAST APPROACH: AVERAGE INTENSITY WEIGHTING
+# ===============================================================================
+water_bathy <- bathy_200
+water_bathy[water_bathy >= 0] <- NA
+water_bathy[is.na(water_bathy)] <- 0
+
+fun_water <- function(x) {
+  ifelse(is.na(x[1]) || is.na(x[2]), 0, 1)
+}
+
+tr_water <- transition(water_bathy,
+                       transitionFunction = fun_water,
+                       directions = 8,
+                       symm = FALSE) %>%
+  geoCorrection(., type = "c")
+
+water_polygon_sf <- rasterToPolygons(water_mask, dissolve = TRUE) %>%
+  st_as_sf()
+
+grid_res <- 200
+grid_water <- st_make_grid(water_polygon_sf,
+                           cellsize = grid_res,
+                           what = "centers") %>%
+  st_sf() %>%
+  st_intersection(water_polygon_sf)
+
+RelativeExposure <- function(source, transition, decay_type, grid_points_sf, empty_raster) {
+  if (!identical(st_crs(source), st_crs(grid_points_sf))) {
+    stop("CRS mismatch")
+  }
+  
+  source_sp <- as(source, "Spatial")
+  grid_points_sp <- as(grid_points_sf, "Spatial")
+  distance <- costDistance(transition, grid_points_sp, source_sp)
+  min_dist <- apply(distance, 1, min)
+  
+  a_param <- switch(decay_type, "I" = -1, "II" = -0.1, "III" = -0.01, "IV" = -0.001)
+  exposure <- exp((0.000025 * a_param) * (min_dist)^2)
+  
+  coords <- st_coordinates(grid_points_sf)
+  sp_exposure <- SpatialPointsDataFrame(coords = coords,
+                                        data = data.frame(exposure = exposure),
+                                        proj4string = CRS(st_crs(empty_raster)$proj4string))
+  
+  exposure_rast <- rasterize(sp_exposure, empty_raster, field = "exposure", fun = mean, background = NA)
+  max_value <- cellStats(exposure_rast, stat = "max", na.rm = TRUE)
+  exposure_rast[] <- exposure_rast[] / max_value
+  exposure_rast <- mask(exposure_rast, water_mask)
+  
+  return(exposure_rast)
+}
+
+template_raster <- raster(extent(bathy_200), resolution = 200, crs = projection(bathy_200))
+decay_type <- "III"
+
+print("Calculating coastal light exposure with average intensity weighting...")
+
+# Calculate from all sources at once
+light_exposure <- RelativeExposure(
+  source = light_source_points,
+  transition = tr_water,
+  decay_type = decay_type,
+  grid_points_sf = grid_water,
+  empty_raster = template_raster
+)
+
+# Apply average intensity
+avg_intensity <- mean(light_source_points$intensity_index)
+light_exposure <- light_exposure * avg_intensity
+
+# Normalize
+max_val <- cellStats(light_exposure, stat = "max", na.rm = TRUE)
+light_exposure <- light_exposure / max_val
+light_exposure <- mask(light_exposure, water_mask)
+light_exposure[light_exposure == 0] <- NA
+
+writeRaster(light_exposure, "coastal_light_exposure_IIIt.tif", overwrite = TRUE)
+save(light_exposure, file = "coastal_light_exposure_IIIt.RData")
+
+print(paste("Complete! Average intensity:", round(avg_intensity, 3)))
+```
+
+```{r plot}
+png("coastIII.png")
+# Create plot similar to your other stressor maps
+plot(light_exposure, 
+     main = "Coastal Light Exposure (top 5 points Type III)")
+# Add scale bar
+scalebar(d = 10000,  # distance in meters (adjust based on your map size)
+         xy = NULL,   # NULL = bottom left corner
+         type = "bar",
+         divs = 2,
+         below = "km",
+         label = c(0, 5, 10))
+dev.off()    
+```
+
+## References
+
+Halpern, B. S., Walbridge, S., Selkoe, K. A., Kappel, C. V., Micheli, F., D'Agrosa, C., ... & Watson, R. (2008). A global map of human impact on marine ecosystems. *Science*, 319(5865), 948-952.
+
+Knowledge Network for Bioinformatics. (2019). *Global nightlight raster data for marine impact assessment*. Available at: https://knb.ecoinformatics.org/view/doi:10.5063/F19Z92TWRetryClaude can make mistakes. Please double-check responses.

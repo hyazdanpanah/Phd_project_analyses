@@ -22,7 +22,6 @@
 
 # Output files you can regenerate
 *.pdf
-*.png
 *.jpg
 *.jpeg
 

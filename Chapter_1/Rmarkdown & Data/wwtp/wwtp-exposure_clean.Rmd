@@ -1,0 +1,1278 @@
+---
+title       : "Waste Water Treatment Plant exposure in the Saguenay"
+author      :
+  - Hediyeh Yazdanpanah
+  - F. Maps
+date        : "`r format(Sys.time(), '%d %B %Y')`"
+output      : 
+  html_document:
+    code_folding : show
+    highlight    : pygments
+    theme        : yeti
+    toc          : TRUE
+    toc_depth    : 4
+    toc_float:
+      collapsed     : TRUE
+      smooth_scroll : TRUE
+    df_print     : paged
+    fig_caption  : TRUE
+description : >
+  This is a first markdown script for Saguenay fjord stressor waste water treatment plants exposure.
+---
+Water Waste Treatment Plants can be be considered as a human-induced stressors in the ecosystem.
+
+## Mechanism of Wastewater Treatment Plants
+
+WWTPs operate through **three main treatment processes** [(Al-Salmi,2023)](https://doi.org/10.22271/27067483.2023.v5.i2b.276): 
+
+1. **Physical processes** - Physical separation and filtration
+2. **Chemical processes** - Chemical treatment and precipitation  
+3. **Biological processes** - Activated sludge treatment and biological decomposition
+
+These facilities are designed to remove:
+
+- Organic matter
+- Nutrients (nitrogen and phosphorus)
+- Heavy metals
+- Pathogens (bacteria, viruses)
+- Various other contaminants
+
+## Negative Impacts of WWTPs
+
+### 1. Residual Contaminants
+
+- **Pharmaceuticals and personal care products** persist in treated water
+- **Emerging contaminants** not fully removed during treatment
+- Cause endocrine disruption, reproductive issues, and behavioral changes in aquatic organisms
+
+### 2. Nutrient Loading
+
+- While reduced, nutrients aren't completely eliminated
+- **Chronic nutrient enrichment** in receiving water bodies
+- Can still stimulate algal blooms and create hypoxic conditions
+- Results in fish kills and biodiversity loss
+
+### 3. Thermal Pollution
+
+- Treated effluents often warmer than natural receiving waters
+- **Temperature fluctuations** affect metabolism, reproduction, and survival of aquatic organisms
+- Elevated temperatures reduce dissolved oxygen levels
+
+### 4. Microorganism Introduction
+
+- Some bacteria and viruses survive treatment processes
+- **Spread of antibiotic resistance** in aquatic environments
+- Poses threats to both environmental and human health
+- Alters natural microbial communities in receiving waters
+
+### 5. Socio-economic Consequences
+
+- Water quality degradation affects fisheries and tourism
+- Increases costs for drinking water treatment
+- Economic losses from recreational activity impacts
+
+
+```{r setup, include=FALSE}
+library(terra)
+library(sf)
+library(gdistance)
+library(dplyr)
+library(raster)
+library(ggplot2)
+library(gstat)
+library(viridis)
+library(RColorBrewer)
+library(scales)
+library(grid)
+
+knitr::opts_chunk$set(
+	echo = TRUE,
+	error = FALSE,
+	warning = FALSE,
+	tidy = FALSE
+)
+```
+
+for the first step, the bathynetry and the location of each WWTP have been loaded. the resolution has been reduced to run faster. 
+in this script we used **transition function** : 
+The `fun_bathy` function defines **movement conductance** between adjacent cells based on bathymetric (water depth) differences. 
+This creates a "movement cost surface" where the computer can calculate the easiest paths for things to move through water based on depth changes.
+   
+```{r bathymetry and shapefiles}
+########### Faster way - reduce resolution ##############
+
+# Load bathymetry data (WGS84) and coastline and WWTP station
+bathy     <- raster("bathy.tif")
+coastline <- st_read("coastline.shp") 
+wwtp_sf   <- st_read("wwtp_sf.shp")
+
+# Define target CRS (UTM Zone 19N)
+target_crs <- "+proj=utm +zone=19 +datum=WGS84 +units=m +no_defs"
+
+# Reproject bathy to UTM Zone 19N
+bathy_utm <- projectRaster( bathy, 
+                            crs = target_crs )
+
+# Define Saguenay Fjord extent in UTM coordinates
+xmin <- 345000
+ymin <- 5325000
+xmax <- 450000
+ymax <- 5370000
+
+saguenay_extent <- extent( xmin,
+                           xmax,
+                           ymin,
+                           ymax )
+
+# Reproject cropped raster to use in the rest of the analysis
+bathy_proj   <- crop( bathy_utm,
+                      saguenay_extent )
+
+# Reduce resolution of bathymetry raster
+bathy_200 <- projectRaster( bathy_proj,
+                            crs = target_crs,
+                            res = c(200, 200) )
+
+# Replace values > 0 (land) with 0 for calculations
+bathy_200[ bathy_200>0 ] <- 0
+
+# Define transition function that accounts for negative depths
+fun_bathy <- function(x) {
+  # Check if first cell is shallower than second
+  ifelse( x[1] > x[2],
+          # Account for negative values
+          pmax( 0.001, 1 - abs( (x[2] - x[1]) / x[2] ) ),
+          # Default conductance for uphill movement (make it difficult)
+          0.45)
+}
+
+# Create transition layer
+tr_bathy <- transition( bathy_200, 
+                        transitionFunction = fun_bathy,
+                        directions         = 8,
+                        symm               = FALSE) %>%
+# Apply geocorrection to transition layer
+            geoCorrection( ., 
+                           type = "c")
+
+# Convert TransitionLayer to temporary raster for ploting
+    tr_raster  <- raster( tr_bathy )
+crs(tr_raster) <- target_crs
+
+```
+
+# Prepare waste water treatment plants (WWTP) data 
+
+Here is the function from Dreujou to compute exposure.
+tha RelativeExposure function only works for the points located in the water , so all the wwtps are projected to the closest water cell:   
+
+```{r positions of WWTP}
+
+# Function to find the nearest non-NA cell in case the
+# waste water treatments plans are inland
+
+nearest_valid_cell <- function( point, raster ) {
+
+  # Find valid cells
+  valid_cells <- which( !is.na( values(raster) ), 
+                        arr.ind = TRUE )
+  # Get their coordinates
+  valid_coords <- xyFromCell( raster,
+                              valid_cells )
+
+  # Compute Euclidean distances from the point to valid cells
+  distances <- sqrt( ( valid_coords[,1] - point[1] )^2 + 
+                     ( valid_coords[,2] - point[2] )^2 )
+
+  # Get the closest valid cell
+  nearest_idx <- which.min( distances )
+  
+  return( valid_coords[ nearest_idx, , drop=FALSE ] )
+}
+
+# Create spatial object and crs transformation for waste water treatment plants (wwtp)
+st_wwtp <- st_transform( wwtp_sf, 
+                         crs = target_crs ) #32619
+
+# Add station Saint-Jen-Baptiste
+            pts_wwtp_SJB  <- st_wwtp[1,]
+st_geometry(pts_wwtp_SJB) <- nearest_valid_cell( st_coordinates(st_wwtp[1,]),
+                                                 bathy_200 ) %>%
+                             st_point() %>%
+                             st_sfc()   %>%
+                             st_set_crs( ., target_crs )
+
+# Add station Saint-Fulgence
+            pts_wwtp_SF  <- st_wwtp[2,]
+st_geometry(pts_wwtp_SF) <- nearest_valid_cell( st_coordinates(st_wwtp[2,]),
+                                                bathy_200 ) %>%
+                            st_point() %>%
+                            st_sfc()   %>%
+                            st_set_crs( ., target_crs )
+
+# Add station Tadoussac
+            pts_wwtp_T  <- st_wwtp[3,]
+st_geometry(pts_wwtp_T) <- nearest_valid_cell( st_coordinates(st_wwtp[3,]),
+                                               bathy_200 ) %>%
+                           st_point() %>%
+                           st_sfc()   %>%
+                           st_set_crs( ., target_crs )
+
+# Add station Saguenay (Chicoutimi)
+            pts_wwtp_SC  <- st_wwtp[4,]
+st_geometry(pts_wwtp_SC) <- nearest_valid_cell( st_coordinates(st_wwtp[4,]),
+                                                bathy_200 ) %>%
+                            st_point() %>%
+                            st_sfc()   %>%
+                            st_set_crs( ., target_crs )
+
+# Add station Petit Saguenay
+            pts_wwtp_PS  <- st_wwtp[5,]
+st_geometry(pts_wwtp_PS) <- nearest_valid_cell( st_coordinates(st_wwtp[5,]),
+                                                bathy_200 ) %>%
+                            st_point() %>%
+                            st_sfc()   %>%
+                            st_set_crs( ., target_crs )
+
+# Add station Saguenay (La Baie)
+            pts_wwtp_SLB  <- st_wwtp[6,]
+st_geometry(pts_wwtp_SLB) <- nearest_valid_cell( st_coordinates(st_wwtp[6,]),
+                                                 bathy_200 ) %>%
+                             st_point() %>%
+                             st_sfc()   %>%
+                             st_set_crs( ., target_crs )
+
+# Add station L'Anse-Saint-Jean
+            pts_wwtp_ASJ  <- st_wwtp[7,]
+st_geometry(pts_wwtp_ASJ) <- nearest_valid_cell( st_coordinates(st_wwtp[7,]),
+                                                 bathy_200 ) %>%
+                             st_point() %>%
+                             st_sfc()   %>%
+                             st_set_crs( ., target_crs )
+
+# Check the geometry of the WWTP on the map
+plot(bathy_200)
+
+points(pts_wwtp_ASJ); text( st_coordinates(pts_wwtp_ASJ), "ASJ", pos=1 )
+points(pts_wwtp_PS);  text( st_coordinates(pts_wwtp_PS),  "PS",  pos=1 )
+points(pts_wwtp_SC);  text( st_coordinates(pts_wwtp_SC),  "SC",  pos=1 )
+points(pts_wwtp_SF);  text( st_coordinates(pts_wwtp_SF),  "SF",  pos=1 )
+points(pts_wwtp_SJB); text( st_coordinates(pts_wwtp_SJB), "SJB", pos=3 )
+points(pts_wwtp_SLB); text( st_coordinates(pts_wwtp_SLB), "SLB", pos=2 )
+points(pts_wwtp_T);   text( st_coordinates(pts_wwtp_T),   "T",   pos=3 )
+```
+
+# Create grid polygon and grid point 
+ we created grid points and grid polygons along the study area  with the 200m  resolution. 
+ 
+```{r grid polygons and points}
+
+# Create bbox_utm object
+bbox_utm <- list( rbind( c(xmin, ymin),
+                         c(xmax, ymin),
+                         c(xmax, ymax),
+                         c(xmin, ymax),
+                         c(xmin, ymin) ) ) %>%
+            st_polygon()                   %>%
+            st_sfc( ., crs = target_crs )
+
+# Define grid resolution (200 meters)
+grid_res <- 200
+
+# Create grid polygons
+grid_polygons <- st_make_grid( bbox_utm, 
+                               cellsize = grid_res, 
+                               what     = "polygons" ) %>% 
+                 st_sf()
+
+# Create grid points
+grid_points <- st_make_grid( bbox_utm, 
+                             cellsize = grid_res, 
+                             what     = "centers" ) %>%
+               st_sf()
+```
+
+
+# Define function to compute Relative Exposure  
+The `RelativeExposure` function calculates **environmental exposure levels** from pollution sources (e.g., wastewater treatment plants) to receptor locations, accounting for **realistic transport pathways** through aquatic environments.
+
+## Scientific Foundation
+
+### Landscape Connectivity Theory in Marine Environments
+
+This methodological approach is grounded in **landscape connectivity theory** originally developed for terrestrial ecosystems (Merriam, 1984; Taylor et al., 1993) and subsequently adapted for marine environmental applications. Landscape connectivity theory provides a framework for understanding how organisms, materials, and energy move through heterogeneous environments, where different areas present varying degrees of resistance to movement.
+
+In the context of wastewater impact assessment in marine environments, this theory allows us to model how pollutants and contaminants disperse from point sources through aquatic systems that exhibit spatial heterogeneity in depth, topography, and hydrodynamic conditions. The Saguenay Fjord, with its complex bathymetric profile and varying water depths, represents an ideal case study for applying these connectivity principles to understand contaminant transport pathways.
+
+### Distance-Decay Models in Environmental Exposure Assessment
+
+Environmental exposure from point sources typically follows well-established **distance-decay relationships**, where the magnitude of environmental impact decreases systematically with increasing distance from the pollution source (Tobler, 1970). This fundamental principle reflects the natural attenuation processes that occur as contaminants disperse, dilute, and undergo biogeochemical transformations during transport through aquatic systems.
+
+The selection of appropriate distance-decay models is critical for accurately representing exposure patterns. Three primary mathematical formulations are commonly employed in environmental modeling:
+
+#### Exponential Decay Model
+$$E = E_0 \cdot e^{-\alpha d}$$
+
+This model assumes that exposure decreases exponentially with distance, representing scenarios where initial dilution is rapid but asymptotically approaches background levels. The exponential model is particularly suitable for modeling conservative pollutants in well-mixed aquatic systems.
+
+#### Power Decay Model  
+$$E = E_0 \cdot d^{-\beta}$$
+
+The power decay function describes exposure patterns where the rate of decrease varies with distance, allowing for more flexible representation of complex dispersion processes. This model is often applied when pollutant transport is influenced by turbulent mixing or when multiple physical processes operate at different spatial scales.
+
+#### Gaussian Decay Model
+$$E = E_0 \cdot e^{-\frac{d^2}{2\sigma^2}}$$
+
+The Gaussian formulation models exposure as a normal distribution around the source location, accounting for both directional dispersion and localized concentration effects. This approach is particularly relevant for modeling plume behavior in stratified water bodies or when prevailing currents create preferential transport directions.
+
+**Model Parameters:**
+- $E$ = exposure level at receptor location
+- $E_0$ = source intensity or initial pollutant concentration  
+- $d$ = cost-distance from source to receptor
+- $\alpha, \beta, \sigma$ = decay parameters reflecting environmental and pollutant characteristics
+
+### Selected Model: Exponential Decay Implementation
+
+**For this Saguenay Fjord analysis, the exponential decay model was selected and implemented** based on its appropriateness for modeling pollutant attenuation in fjord environments. The implemented model follows the mathematical form:
+
+$$E = e^{\alpha \cdot d}$$
+
+Where the decay parameter α takes negative values to ensure proper attenuation with distance.
+
+#### Decay Parameter Scenarios
+
+The exponential model was implemented with four distinct exposure scenarios through different decay parameter values:
+
+**Type I (α = -1.0)**: Represents scenarios with **very steep decay**, suitable for modeling highly reactive contaminants, systems with strong dilution effects, or areas with high turbulent mixing. This scenario assumes that pollutant concentrations decrease very rapidly with distance from the source.
+
+**Type II (α = -0.01)**: Models **moderate decay rates** appropriate for semi-conservative pollutants in moderately mixed aquatic systems. This scenario represents typical conditions where pollutants undergo gradual dilution and transformation processes.
+
+**Type III (α = -0.001)**: Simulates **gradual decay patterns** typical of conservative pollutants or poorly mixed water bodies where contaminants persist over larger distances. This scenario is relevant for persistent organic pollutants or stratified water conditions.
+
+**Type IV (α = -0.0001)**: Represents **very gradual decay** for persistent contaminants or scenarios where transport distances are large relative to decay processes. This scenario models conservative tracers or situations where physical transport dominates over biogeochemical attenuation.
+
+#### Justification for Exponential Model Selection
+
+The exponential decay model was chosen for this Saguenay Fjord analysis over power and Gaussian alternatives for several reasons:
+
+**Theoretical Appropriateness**: Exponential decay accurately represents the first-order kinetics commonly observed in pollutant attenuation processes, including dilution, dispersion, and biogeochemical transformation in aquatic systems.
+
+**Fjord-Specific Considerations**: The Saguenay Fjord's stratified water column and limited mixing characteristics are well-represented by exponential decay, which models the gradual decrease in contaminant concentrations as they move away from discharge points.
+
+**Parameter Interpretability**: The negative exponential formulation allows for intuitive interpretation of decay parameters, where more negative values represent faster attenuation rates.
+
+**Scenario Flexibility**: The four decay parameter options enable sensitivity analysis across different pollutant types and environmental conditions relevant to wastewater discharge assessment.
+
+**Conservative Modeling Approach**: Exponential decay provides a conservative modeling approach that avoids potential overestimation of exposure at intermediate distances that might occur with other models.
+
+### Cost-Distance vs. Euclidean Distance Approaches
+
+#### Traditional Euclidean Distance Limitations
+
+Conventional environmental modeling often relies on **straight-line (Euclidean) distance** calculations, which assume that pollutant transport occurs uniformly across space without regard to environmental heterogeneity. This approach fundamentally ignores the complex physical processes that govern contaminant dispersion in real aquatic systems, including:
+
+- Bathymetric constraints on water movement
+- Density stratification effects
+- Topographic channeling of flow patterns  
+- Presence of physical barriers to transport
+
+#### Cost-Distance Methodology Advantages
+
+The **cost-distance approach** represents a significant methodological advancement by incorporating **ecological resistance** concepts into transport modeling. This method recognizes that different environmental conditions present varying degrees of resistance to pollutant movement, creating preferential pathways and barriers that influence ultimate exposure patterns.
+
+In the context of the Saguenay Fjord wastewater assessment, the cost-distance model incorporates several key environmental factors:
+
+**Bathymetric Gradients**: The transition function developed for this study specifically accounts for depth-related resistance to movement, recognizing that steep bathymetric gradients can impede horizontal mixing and create preferential flow pathways along depth contours.
+
+**Current Patterns**: Fjord systems typically exhibit complex circulation patterns driven by density differences, tidal forcing, and freshwater inputs. These current systems create anisotropic transport conditions where pollutant movement is enhanced in certain directions while being restricted in others.
+
+**Physical Barriers**: Underwater ridges, sills, and topographic constrictions can significantly influence pollutant transport by creating hydraulic barriers or enhancing local mixing processes.
+
+**Habitat Connectivity**: The cost-distance approach maintains spatial relationships between different habitat zones, allowing for assessment of cumulative impacts on interconnected marine ecosystems.
+
+### Exposure Calculation and Normalization
+
+The final exposure calculation process involves several key steps that ensure accurate representation of pollutant exposure patterns across the fjord system. For each receptor location, the algorithm identifies the minimum cost-distance to any pollution source, representing the most likely exposure pathway under the assumption that pollutants will follow the path of least resistance through the fjord system.
+
+The resulting exposure surface is normalized to a standardized scale where maximum values represent areas of highest relative exposure (typically at or near source locations), while minimum values indicate areas of lowest exposure (distant or hydraulically isolated locations). This normalization facilitates comparative assessment across different decay scenarios and enables integration with other environmental risk factors for comprehensive impact evaluation.
+
+### Applications in Wastewater Impact Assessment
+
+#### 1. Pollutant Dispersion Modeling
+Cost-distance models provide enhanced capabilities for predicting contaminant spread patterns by incorporating realistic transport pathways. This application is particularly valuable for assessing the spatial extent of wastewater plumes and identifying areas of elevated exposure risk.
+
+#### 2. Ecological Risk Assessment  
+By maintaining spatial relationships between pollution sources and sensitive habitat areas, the methodology enables identification of vulnerable marine ecosystems that may experience disproportionate impacts from wastewater discharge activities.
+
+#### 3. Regulatory Compliance
+The spatially explicit nature of cost-distance modeling supports determination of appropriate mixing zones and discharge limits by providing quantitative assessments of pollutant transport distances and dilution rates under varying environmental conditions.
+
+#### 4. Environmental Monitoring Optimization
+Cost-distance analysis can inform the strategic placement of environmental monitoring stations by identifying locations where pollutant concentrations are likely to be elevated based on transport pathway analysis.
+
+### Methodological Advantages Over Simple Distance Models
+
+#### Realistic Transport Pathways
+The integration of bathymetric transition functions ensures that modeled pollutant transport pathways reflect the complex three-dimensional structure of fjord environments, providing more accurate representations of actual dispersion processes.
+
+#### Barrier Effects Recognition  
+The methodology explicitly accounts for how transitions between deep and shallow water zones can affect mixing processes and create semi-discrete exposure zones within the fjord system.
+
+#### Multiple Source Integration
+Cost-distance modeling frameworks can simultaneously evaluate cumulative exposures from multiple wastewater sources, enabling assessment of synergistic effects and identification of areas experiencing elevated exposure from multiple discharge points.
+
+#### Spatially Explicit Relationships
+The approach maintains explicit geographic relationships between sources, transport pathways, and receptor locations, supporting detailed spatial analysis of exposure patterns and facilitating integration with other spatial environmental data.
+
+## References
+
+**Core Methodology:**
+- Adriaensen, F., Chardon, J. P., De Blust, G., Swinnen, E., Villalba, S., Gulinck, H., & Matthysen, E. (2003). The application of 'least-cost' modelling as a functional landscape model. *Landscape and Urban Planning*, 64(4), 233-247.
+
+**Marine Connectivity:**
+- Treml, E. A., Halpin, P. N., Urban, D. L., & Pratson, L. F. (2008). Modeling population connectivity by ocean currents, a graph-theoretic approach for marine conservation. *Landscape Ecology*, 23(1), 19-36.
+
+**Environmental Exposure Assessment:**
+- Malczewski, J. (1999). *GIS and multicriteria decision analysis*. John Wiley & Sons.
+- Miller, J., & Franklin, J. (2002). Modeling the distribution of four vegetation alliances using generalized linear models and classification trees with spatial dependence. *Ecological Modelling*, 157(2-3), 227-247.
+
+**Distance-Decay Theory:**
+- Tobler, W. R. (1970). A computer movie simulating urban growth in the Detroit region. *Economic Geography*, 46(sup1), 234-240.
+
+**Landscape Connectivity Theory:**
+- Merriam, G. (1984). Connectivity: a fundamental ecological characteristic of landscape pattern. *Proceedings of the 1st International Seminar on Methodology in Landscape Ecological Research and Planning*, 5-15.
+- Taylor, P. D., Fahrig, L., Henein, K., & Merriam, G. (1993). Connectivity is a vital element of landscape structure. *Oikos*, 68(3), 571-573.
+
+```{r define exposure function}
+                           
+# Define function Distance Weighting to compute Relative Exposure
+RelativeExposure <- function( source,
+                              transition,
+                              decay_type,
+                              grid_points_sf, 
+                              grid_polygons_sf,
+                              empty_raster ) {
+  # Verify input CRS match
+  if ( !identical( st_crs(source), st_crs(grid_points_sf) ) ) {
+    stop( "CRS mismatch between source and grid points" )
+  }
+  
+  # Calculate cost distance with error handling
+  tryCatch( {
+    # Convert sf objects to sp
+         source_sp <- as( source,         "Spatial" )
+    grid_points_sp <- as( grid_points_sf, "Spatial" )
+    
+    distance <- costDistance( transition, 
+                              grid_points_sp,
+                              source_sp )
+    if ( all( is.na( distance ) ) ) {
+      stop( "All distance values are NA" )
+    }
+    min_dist <- apply( distance, 1, min )
+    
+    # Verify distance calculation
+    # print( "Distance calculation summary:" )
+    # print( summary( as.vector( min_dist[ is.finite(min_dist) ] ) ) )
+    
+    # Calculate decay parameter
+    a_param <- switch( decay_type,
+                       "I"   = -1,
+                       "II"  = -0.1,
+                       "III" = -0.01,
+                       "IV"  = -0.001,
+                       stop( "Invalid decay type" ) )
+    
+    # Compute exposure values
+    exposure <- exp((0.000025 * a_param) * (min_dist)^2)
+    
+    # Create exposure raster
+    coords <- st_coordinates( grid_points_sf )
+    sp_exposure <- SpatialPointsDataFrame(
+      coords      = coords,
+      data        = data.frame(exposure = exposure),
+      proj4string = CRS( st_crs(empty_raster)$proj4string )
+    )
+    
+    # Rasterize exposure values
+    exposure_rast <- rasterize( sp_exposure, 
+                                empty_raster, 
+                                field      = "exposure", 
+                                fun        = mean,
+                                background = NA )
+
+    # Normalize exposure values
+    max_value <- cellStats( exposure_rast, 
+                            stat  = "max",
+                            na.rm = TRUE )
+    exposure_rast[] <- exposure_rast[] / max_value
+    
+    return(exposure_rast)
+    
+  }, error = function(e) {
+    stop( "Error in exposure calculation: ", e$message )
+  } )
+}
+```
+
+# Set parameters and compute the exposure
+
+Here I show the test for different level of decay parameters. 
+We chose the fourth level (IV decay parameter = 0.001).an then applied the function for each of stations.
+
+```{r compute exposure}
+
+# Create an empty raster template with proper CRS and resolution
+template_raster <- raster( extent(bathy_200), 
+                           resolution = 200,
+                           crs        = projection(bathy_200) )
+
+# Set decay type for WWTP sources based on Dreujou's classification
+decay_type <- "IV"
+
+# Compute individual relative exposure fields
+
+wwtp_ASJ <- RelativeExposure( pts_wwtp_ASJ,
+                              tr_bathy,
+                              decay_type, 
+                              grid_points, 
+                              grid_polygons,
+                              template_raster )
+
+wwtp_PS <- RelativeExposure( pts_wwtp_PS,
+                             tr_bathy,
+                             decay_type, 
+                             grid_points, 
+                             grid_polygons,
+                             template_raster )
+
+wwtp_SC <- RelativeExposure( pts_wwtp_SC,
+                             tr_bathy,
+                             decay_type, 
+                             grid_points, 
+                             grid_polygons,
+                             template_raster )
+
+wwtp_SF <- RelativeExposure( pts_wwtp_SF,
+                             tr_bathy,
+                             decay_type, 
+                             grid_points, 
+                             grid_polygons,
+                             template_raster )
+
+wwtp_SJB <- RelativeExposure( pts_wwtp_SJB,
+                              tr_bathy,
+                              decay_type, 
+                              grid_points, 
+                              grid_polygons,
+                              template_raster )
+
+wwtp_SLB <- RelativeExposure( pts_wwtp_SLB,
+                              tr_bathy,
+                              decay_type, 
+                              grid_points, 
+                              grid_polygons,
+                              template_raster )
+
+wwtp_T <- RelativeExposure( pts_wwtp_T,
+                            tr_bathy,
+                            decay_type, 
+                            grid_points, 
+                            grid_polygons,
+                            template_raster )
+```
+
+## Scenarios of relative contributions
+(I tried different scenarios but here I just mentioned the )
+
+preparing data
+
+```{r data}
+# Open WWTP files and filter it to create several scenarios to evaluate the relative contribution of each treatment plant to the overall inflo inside the Saguenay system
+
+wwtp_names <- c( r"(Station d'épuration de L'Anse-Saint-Jean)",              #ASJ
+                 r"(Station d'épuration de Petit Saguenay)",                 #PS
+                 r"(Station d'épuration de Saguenay (Chicoutimi))",          #SC
+                 r"(Station d'épuration de Saint-Fulgence)",                 #SF
+                 r"(Station d'épuration de Saguenay (Saint-Jean-Baptiste))", #SJB
+                 r"(Station d'épuration de Saguenay (La Baie))",             #SLB
+                 r"(Station d'épuration de Tadoussac)" )                     #T
+
+
+wwtp_stn <- read.csv("/Users/hediyeh/Desktop/Saguenay /wwtp/STEP Effluents Données Brutes 2024-07-16 (modifié).csv") %>% 
+            filter( Nom.de.la.station.d.épuration == wwtp_names[1] |
+                    Nom.de.la.station.d.épuration == wwtp_names[2] |
+                    Nom.de.la.station.d.épuration == wwtp_names[3] |
+                    Nom.de.la.station.d.épuration == wwtp_names[4] |
+                    Nom.de.la.station.d.épuration == wwtp_names[5] |
+                    Nom.de.la.station.d.épuration == wwtp_names[6] |
+                    Nom.de.la.station.d.épuration == wwtp_names[7]
+                  ) %>%
+            select( Nom.de.la.station.d.épuration,
+                    Numéro.de.la.station.d.épuration,
+                    Taille.de.la.station.d.épuration,
+                    Débit...Calcul.de.taille..m..d.,
+                    Nombre.d.ouvrages.de.surverse
+                  )
+wwtp_stn$Débit...Calcul.de.taille..m..d. <- as.numeric(wwtp_stn$Débit...Calcul.de.taille..m..d.)
+
+# Read file with the WWTP station and their overfow structures and combine 
+# with the previous file's information
+file_os   <- read.csv("OS DonBrut 2024-07-16_ouvrages de surverse.csv") %>% 
+             select( Nom.de.la.station.d.épuration,
+                     Numéro.de.la.station.d.épuration,
+                     Lac.Cours.d.eau..milieu.récepteur.,
+                     Identifiant.unique.de.l.OS..,
+                     Débit.passant.par.l.ouvrage..m3.jour.,
+                     Débit.passant.par.l.ouvrage....
+                   ) %>%
+             left_join( wwtp_stn,
+                        .,
+                        by = "Nom.de.la.station.d.épuration" )
+
+# Read file with the overflow structures and their outflow volume and combine 
+# with the previous file's information
+file_of <- read.csv("OS DonBrut 2024-07-16_données.csv") %>% 
+           select( Identifiant.unique.de.l.OS..,
+                   X1900.01.00,
+                   Durée.de.débordement..minutes.,
+                   Volume.de.débordement..m..,
+                   Contexte.du.débordement
+                 )
+
+# Combine information from both files
+file_over <- left_join( file_os,
+                        file_of,
+                        by = "Identifiant.unique.de.l.OS.." )
+
+# Convert date dat in POSIX date format
+file_over$X1900.01.00 <- as.POSIXct( file_over$X1900.01.00, format="%d-%b-%y" )
+  
+# Aggregate values of numerical variables as one per station
+wwtp_over <- file_over %>% 
+             group_by(  Nom.de.la.station.d.épuration ) %>%
+             summarise( Taille.de.la.station    = first( Taille.de.la.station.d.épuration ),
+                        Nombre.de.débordements  = n(),
+                        Volume.des.débordements = sum( Volume.de.débordement..m.., na.rm = TRUE ),
+                        Durée.des.débordements  = sum( Durée.de.débordement..minutes., na.rm = TRUE ) )
+```
+
+
+# Scenario based on the *overflow intensity index*
+
+This is the comprehensive scenario for WWTP in SF based on the <a href="https://fondationrivieres.org/nos-actions/carte-palmares-deversements-quebec/faq-deversements/">overflow intensity index</a> reported by *Fondation rivieres*
+
+$$
+\text{Indice d'intensité} = \sum_{\text{année}} \frac{t \times Q_{conc.} \times \%Q_{conc.}}{1 440 \frac{min}{jour}}
+$$
+
+Where:
+
+- $t$ (Duration): The duration of the overflow event in minutes
+- $Q_{conc.}$ (Design Flow): The design flow rate of the wastewater treatment plant in cubic meters per day (m³/day)
+- $\%Q_{conc.}$ (Flow Percentage): The percentage of the design flow that passed through the overflowing structure
+
+This product is then divided by 1,440 (the number of minutes in a day) to normalize the values.
+
+**why this approach?**
+It is difficult to measure the exact volume of wastewater released during overflow events, as such data is not available. However, the size of each overflow structure is known, and larger structures are assumed to release more wastewater when they overflow.
+
+To estimate the potential impact, we developed an Overflow Intensity Index, which considers the treatment plant’s design flow, the size of the overflowing structure, and the duration of each overflow. This provides an approximate indication of the volume potentially released.
+
+Since similar-sized structures exist across Quebec municipalities, this index allows for fair comparisons between regions. It helps identify where intervention is most urgently needed to reduce environmental impact.
+
+The index has been validated on 50 wastewater systems and successfully identified all previously known priority cases.
+
+```{r wwtp based on overflew index}
+# Aggregate values of numerical variables as one per station
+file_over_index <- file_over %>%
+  mutate(
+    intensity_index = (Durée.de.débordement..minutes. * 
+                     Débit.passant.par.l.ouvrage..m3.jour. * 
+                     `Débit.passant.par.l.ouvrage....`) / 1440
+  )
+wwtp_over_index <- file_over_index %>% 
+             group_by( Nom.de.la.station.d.épuration) %>%
+             summarise( Taille.de.la.station    = first( Taille.de.la.station.d.épuration ),
+                        Nombre.de.débordements  = n(),
+                       # Volume.des.débordements = sum( Volume.de.débordement..m.., na.rm = TRUE ),
+                        #Durée.des.débordements  = sum( Durée.de.débordement..minutes., na.rm = TRUE ),
+                        intensity_index = sum(intensity_index, na.rm = TRUE))
+
+# Rescale WWTP exposure values
+
+# 1) Rescale based on the index intensity 
+wwtp_index <- sum( wwtp_over_index$intensity_index )
+
+scl_wwtp_index <- rep( 0, length(wwtp_names) )
+for ( i in 1:length(wwtp_names) ) {
+    scl_wwtp_index[i] <- wwtp_over_index$intensity_index[i] / wwtp_index
+}
+
+# 2) Combine individual exposure values
+wwtp_exp <- wwtp_ASJ * scl_wwtp_index[1] +
+            wwtp_PS  * scl_wwtp_index[2] +
+            wwtp_SC  * scl_wwtp_index[3] +
+            wwtp_SLB * scl_wwtp_index[4] +
+            wwtp_SJB * scl_wwtp_index[5] +
+            wwtp_SF  * scl_wwtp_index[6] +
+            wwtp_T   * scl_wwtp_index[7]
+
+wwtp_exp <- wwtp_exp / max( values(wwtp_exp), na.rm = TRUE )
+
+wwtp_exp[ wwtp_exp==0 ] <- NA
+
+
+# Save only the wwtp_index_exposure object
+save(wwtp_exp, file = "wwtp_index_exposure_IV.RData")
+
+
+# 3) Plot the exposure in the system
+barplot( scl_wwtp_index,
+         names.arg = c("ASJ",
+                       "PS",
+                       "SC",
+                       "SLB",
+                       "SJB",
+                       "SF",
+                       "T" ),
+         ylim      = c(0,1),
+         main      = "Relative contribution of each WWTP based on the numbers of overflows",
+         ylab      = "Relative contribution",
+         xlab      = "WWTP"
+        )
+```
+
+```{r plot}
+png("wwtpIV.png")
+plot( wwtp_exp,
+      main = "Waste Water treatment IV" )
+# Add scale bar
+scalebar(d = 10000,  # distance in meters (adjust based on your map size)
+         xy = NULL,   # NULL = bottom left corner
+         type = "bar",
+         divs = 2,
+         below = "km",
+         label = c(0, 5, 10))
+
+#points(pts_wwtp_ASJ); text( st_coordinates(pts_wwtp_ASJ), "ASJ", pos=1 )
+#points(pts_wwtp_PS);  text( st_coordinates(pts_wwtp_PS),  "PS",  pos=1 )
+#points(pts_wwtp_SC);  text( st_coordinates(pts_wwtp_SC),  "SC",  pos=1 )
+#points(pts_wwtp_SF);  text( st_coordinates(pts_wwtp_SF),  "SF",  pos=1 )
+#points(pts_wwtp_SJB); text( st_coordinates(pts_wwtp_SJB), "SJB", pos=3 )
+#points(pts_wwtp_SLB); text( st_coordinates(pts_wwtp_SLB), "SLB", pos=2 )
+#points(pts_wwtp_T);   text( st_coordinates(pts_wwtp_T),   "T",   pos=3 )
+dev.off()
+```
+
+# winter time(ice covered)
+Based on <a href="https://www.qc.dfo-mpo.gc.ca/infoceans/en/saguenay-fjord-winter-recreational-groundfish-fishery">DFO report</a> the ice covered period for ice fishing is mid Jan to first week in Mar.we consider this period with the previous index
+
+```{r wwtp based on overflew index by winter}
+# Convert X1900.01.00 to proper date format and filter for Jan 15 to March 7
+file_over_winter <- file_over %>%
+  # Convert the date string to actual Date type
+  mutate(Date = as.Date(X1900.01.00)) %>%
+  # Create month and day columns for filtering
+  mutate(
+    Month = lubridate::month(Date),
+    Day = lubridate::day(Date)
+  ) %>%
+  # Filter for dates between Jan 15 and March 7 of any year
+  filter(
+    (Month == 1 & Day >= 15) | 
+    (Month == 2) | 
+    (Month == 3 & Day <= 7)
+  )
+
+# Calculate intensity index for the filtered winter season data
+file_over_index_winter <- file_over_winter %>%
+  mutate(
+    intensity_index = (Durée.de.débordement..minutes. * 
+                     Débit.passant.par.l.ouvrage..m3.jour. * 
+                     `Débit.passant.par.l.ouvrage....`) / 1440
+  )
+
+# Group by station name and summarize the winter season data
+wwtp_over_winter <- file_over_index_winter %>% 
+  group_by(Nom.de.la.station.d.épuration) %>%
+  summarise(
+    Taille.de.la.station = first(Taille.de.la.station.d.épuration),
+    Nombre.de.débordements = n(),
+    # Volume.des.débordements = sum(Volume.de.débordement..m.., na.rm = TRUE),
+    # Durée.des.débordements = sum(Durée.de.débordement..minutes., na.rm = TRUE),
+    intensity_index = sum(intensity_index, na.rm = TRUE)
+  )
+
+# Print out the stations in both dataframes to debug
+print("Stations in wwtp_names:")
+print(wwtp_names)
+print("Stations in wwtp_over_winter:")
+print(wwtp_over_winter$Nom.de.la.station.d.épuration)
+
+# Rescale WWTP exposure values - FIXED APPROACH
+# 1) Rescale based on the index intensity 
+wwtp_index_winter <- sum(wwtp_over_winter$intensity_index)
+scl_wwtp_index_winter <- rep(0, length(wwtp_names))
+for (i in 1:length(wwtp_names)) {
+    # Find matching station in the GROUPED data frame
+    station_index <- which(wwtp_over_winter$Nom.de.la.station.d.épuration == wwtp_names[i])
+    
+    # If station exists in the winter data, get its intensity index, otherwise use 0
+    if(length(station_index) > 0) {
+        scl_wwtp_index_winter[i] <- wwtp_over_winter$intensity_index[station_index] / wwtp_index_winter
+    } else {
+        scl_wwtp_index_winter[i] <- 0  # No data for this station in winter period
+        warning(paste("No winter data found for station:", wwtp_names[i]))
+    }
+}
+
+# Print the scaling values for debugging
+print("Winter scaling values:")
+print(data.frame(Station = wwtp_names, ScalingFactor = scl_wwtp_index_winter))
+
+# 2) Combine individual exposure values
+wwtp_exp <- wwtp_ASJ * scl_wwtp_index_winter[1] +
+            wwtp_PS  * scl_wwtp_index_winter[2] +
+            wwtp_SC  * scl_wwtp_index_winter[3] +
+            wwtp_SLB * scl_wwtp_index_winter[4] +
+            wwtp_SJB * scl_wwtp_index_winter[5] +
+            wwtp_SF  * scl_wwtp_index_winter[6] +
+            wwtp_T   * scl_wwtp_index_winter[7]
+wwtp_exp <- wwtp_exp / max(values(wwtp_exp), na.rm = TRUE)
+wwtp_exp[wwtp_exp == 0] <- NA
+
+# 3) Plot the exposure in the system for winter season (Jan 15 - Mar 7)
+# First plot: Relative contribution bar chart
+
+
+barplot(
+  scl_wwtp_index_winter,
+  names.arg = c("ASJ", "PS", "SC", "SLB", "SJB", "SF", "T"),
+  ylim = c(0, 1),
+  main = "Relative contribution of each WWTP (Jan 15 - Mar 7)",
+  ylab = "Relative contribution",
+  xlab = "WWTP"
+)
+
+# Second plot: Spatial distribution
+
+plot(
+  wwtp_exp,
+  main = "WWTP exposure map (Jan 15 - Mar 7)"
+)
+
+# Add points and labels for stations
+points(pts_wwtp_ASJ); text(st_coordinates(pts_wwtp_ASJ), "ASJ", pos = 1)
+points(pts_wwtp_PS);  text(st_coordinates(pts_wwtp_PS),  "PS",  pos = 1)
+points(pts_wwtp_SC);  text(st_coordinates(pts_wwtp_SC),  "SC",  pos = 1)
+points(pts_wwtp_SF);  text(st_coordinates(pts_wwtp_SF),  "SF",  pos = 1)
+points(pts_wwtp_SJB); text(st_coordinates(pts_wwtp_SJB), "SJB", pos = 3)
+points(pts_wwtp_SLB); text(st_coordinates(pts_wwtp_SLB), "SLB", pos = 2)
+points(pts_wwtp_T);   text(st_coordinates(pts_wwtp_T),   "T",   pos = 3)
+
+# Optional: Create a comparison with the full year data
+# Create a data frame for comparison
+comparison_df <- data.frame(
+  Station = c("ASJ", "PS", "SC", "SLB", "SJB", "SF", "T"),
+  Full_Year = scl_wwtp_index,
+  Winter_Period = scl_wwtp_index_winter
+)
+
+# Create a side-by-side barplot for comparison
+
+barplot(
+  t(as.matrix(comparison_df[, c("Full_Year", "Winter_Period")])),
+  beside = TRUE,
+  names.arg = comparison_df$Station,
+  col = c("darkblue", "lightblue"),
+  legend.text = c("Full Year", "Jan 15 - Mar 7"),
+  main = "WWTP Contribution: Full Year vs. Winter Period",
+  ylab = "Relative contribution"
+)
+```
+
+# Non-winter time(non_iced period)
+
+The same approach for non-winter time
+
+```{r wwtp based on overflew index by non-winter period}
+# Convert X1900.01.00 to proper date format and filter for Mar 8 to Jan 14
+file_over_nonwinter <- file_over %>%
+  # Convert the date string to actual Date type
+  mutate(Date = as.Date(X1900.01.00)) %>%
+  # Create month and day columns for filtering
+  mutate(
+    Month = lubridate::month(Date),
+    Day = lubridate::day(Date)
+  ) %>%
+  # Filter for dates between Mar 8 and Jan 14 of any year (opposite of winter filter)
+  filter(
+    (Month == 3 & Day > 7) | 
+    (Month > 3 & Month < 12) |
+    (Month == 12) |
+    (Month == 1 & Day < 15)
+  )
+
+# Calculate intensity index for the filtered non-winter season data
+file_over_index_nonwinter <- file_over_nonwinter %>%
+  mutate(
+    intensity_index = (Durée.de.débordement..minutes. * 
+                     Débit.passant.par.l.ouvrage..m3.jour. * 
+                     `Débit.passant.par.l.ouvrage....`) / 1440
+  )
+
+# Group by station name and summarize the non-winter season data
+wwtp_over_nonwinter <- file_over_index_nonwinter %>% 
+  group_by(Nom.de.la.station.d.épuration) %>%
+  summarise(
+    Taille.de.la.station = first(Taille.de.la.station.d.épuration),
+    Nombre.de.débordements = n(),
+    # Volume.des.débordements = sum(Volume.de.débordement..m.., na.rm = TRUE),
+    # Durée.des.débordements = sum(Durée.de.débordement..minutes., na.rm = TRUE),
+    intensity_index = sum(intensity_index, na.rm = TRUE)
+  )
+
+# Print out the stations in both dataframes to debug
+print("Stations in wwtp_names:")
+print(wwtp_names)
+print("Stations in wwtp_over_nonwinter:")
+print(wwtp_over_nonwinter$Nom.de.la.station.d.épuration)
+
+# Rescale WWTP exposure values
+# 1) Rescale based on the index intensity 
+wwtp_index_nonwinter <- sum(wwtp_over_nonwinter$intensity_index)
+scl_wwtp_index_nonwinter <- rep(0, length(wwtp_names))
+for (i in 1:length(wwtp_names)) {
+    # Find matching station in the GROUPED data frame
+    station_index <- which(wwtp_over_nonwinter$Nom.de.la.station.d.épuration == wwtp_names[i])
+    
+    # If station exists in the non-winter data, get its intensity index, otherwise use 0
+    if(length(station_index) > 0) {
+        scl_wwtp_index_nonwinter[i] <- wwtp_over_nonwinter$intensity_index[station_index] / wwtp_index_nonwinter
+    } else {
+        scl_wwtp_index_nonwinter[i] <- 0  # No data for this station in non-winter period
+        warning(paste("No non-winter data found for station:", wwtp_names[i]))
+    }
+}
+
+# Print the scaling values for debugging
+print("Non-winter scaling values:")
+print(data.frame(Station = wwtp_names, ScalingFactor = scl_wwtp_index_nonwinter))
+
+# 2) Combine individual exposure values
+wwtp_exp_nonwinter <- wwtp_ASJ * scl_wwtp_index_nonwinter[1] +
+                      wwtp_PS  * scl_wwtp_index_nonwinter[2] +
+                      wwtp_SC  * scl_wwtp_index_nonwinter[3] +
+                      wwtp_SLB * scl_wwtp_index_nonwinter[4] +
+                      wwtp_SJB * scl_wwtp_index_nonwinter[5] +
+                      wwtp_SF  * scl_wwtp_index_nonwinter[6] +
+                      wwtp_T   * scl_wwtp_index_nonwinter[7]
+wwtp_exp_nonwinter <- wwtp_exp_nonwinter / max(values(wwtp_exp_nonwinter), na.rm = TRUE)
+wwtp_exp_nonwinter[wwtp_exp_nonwinter == 0] <- NA
+
+# 3) Plot the exposure in the system for non-winter season (Mar 8 - Jan 14)
+# First plot: Relative contribution bar chart
+
+barplot(
+  scl_wwtp_index_nonwinter,
+  names.arg = c("ASJ", "PS", "SC", "SLB", "SJB", "SF", "T"),
+  ylim = c(0, 1),
+  main = "Relative contribution of each WWTP (Mar 8 - Jan 14)",
+  ylab = "Relative contribution",
+  xlab = "WWTP"
+)
+
+# Second plot: Spatial distribution
+
+plot(
+  wwtp_exp_nonwinter,
+  main = "WWTP exposure map (Mar 8 - Jan 14)"
+)
+
+# Add points and labels for stations
+points(pts_wwtp_ASJ); text(st_coordinates(pts_wwtp_ASJ), "ASJ", pos = 1)
+points(pts_wwtp_PS);  text(st_coordinates(pts_wwtp_PS),  "PS",  pos = 1)
+points(pts_wwtp_SC);  text(st_coordinates(pts_wwtp_SC),  "SC",  pos = 1)
+points(pts_wwtp_SF);  text(st_coordinates(pts_wwtp_SF),  "SF",  pos = 1)
+points(pts_wwtp_SJB); text(st_coordinates(pts_wwtp_SJB), "SJB", pos = 3)
+points(pts_wwtp_SLB); text(st_coordinates(pts_wwtp_SLB), "SLB", pos = 2)
+points(pts_wwtp_T);   text(st_coordinates(pts_wwtp_T),   "T",   pos = 3)
+
+# Compare all three periods (full year, winter, non-winter)
+comparison_all_df <- data.frame(
+  Station = c("ASJ", "PS", "SC", "SLB", "SJB", "SF", "T"),
+  Full_Year = scl_wwtp_index,
+  Winter = scl_wwtp_index_winter,
+  Non_Winter = scl_wwtp_index_nonwinter
+)
+
+# Plot a side-by-side comparison of all three periods
+
+barplot(
+  t(as.matrix(comparison_all_df[, c("Full_Year", "Winter", "Non_Winter")])),
+  beside = TRUE,
+  names.arg = comparison_all_df$Station,
+  col = c("darkblue", "lightblue", "skyblue"),
+  legend.text = c("Full Year", "Jan 15 - Mar 7", "Mar 8 - Jan 14"),
+  main = "WWTP Contribution: Seasonal Comparison",
+  ylab = "Relative contribution"
+)
+```
+
+# Winter time 2 ( ice-covered)
+
+Here we consider another duration based on just <a href="https://epe.bac-lac.gc.ca/100/201/301/weekly_acquisitions_list-ef/2017/17-19/publications.gc.ca/collections/collection_2017/mpo-dfo/Fs70-5-2017-022-fra.pdf?nodisclaimer=1">ice -covered period</a> which is early Dec to early Apr. the previous ice-covered period was based on  "ice fishing" period. 
+
+```{r wwtp based on overflew index by winter2}
+# Convert X1900.01.00 to proper date format and filter for Jan 15 to March 7
+file_over_winter2 <- file_over %>%
+  # Convert the date string to actual Date type
+  mutate(Date = as.Date(X1900.01.00)) %>%
+  # Create month and day columns for filtering
+  mutate(
+    Month = lubridate::month(Date),
+    Day = lubridate::day(Date)
+  ) %>%
+# Filter for dates between Dec 1 and Apr 1 of any year
+  filter(
+    (Month == 12) |
+    (Month == 1) |
+    (Month == 2) |
+    (Month == 3) |
+    (Month == 4 & Day == 1)
+  )
+
+# Calculate intensity index for the filtered winter season data
+file_over_index_winter2 <- file_over_winter2 %>%
+  mutate(
+    intensity_index = (Durée.de.débordement..minutes. * 
+                     Débit.passant.par.l.ouvrage..m3.jour. * 
+                     `Débit.passant.par.l.ouvrage....`) / 1440
+  )
+
+# Group by station name and summarize the winter season data
+wwtp_over_winter2 <- file_over_index_winter2 %>% 
+  group_by(Nom.de.la.station.d.épuration) %>%
+  summarise(
+    Taille.de.la.station = first(Taille.de.la.station.d.épuration),
+    Nombre.de.débordements = n(),
+    # Volume.des.débordements = sum(Volume.de.débordement..m.., na.rm = TRUE),
+    # Durée.des.débordements = sum(Durée.de.débordement..minutes., na.rm = TRUE),
+    intensity_index = sum(intensity_index, na.rm = TRUE)
+  )
+
+# Print out the stations in both dataframes to debug
+print("Stations in wwtp_names:")
+print(wwtp_names)
+print("Stations in wwtp_over_winter:")
+print(wwtp_over_winter$Nom.de.la.station.d.épuration)
+
+# Rescale WWTP exposure values - FIXED APPROACH
+# 1) Rescale based on the index intensity 
+wwtp_index_winter2 <- sum(wwtp_over_winter2$intensity_index)
+scl_wwtp_index_winter2 <- rep(0, length(wwtp_names))
+for (i in 1:length(wwtp_names)) {
+    # Find matching station in the GROUPED data frame
+    station_index <- which(wwtp_over_winter2$Nom.de.la.station.d.épuration == wwtp_names[i])
+    
+    # If station exists in the winter data, get its intensity index, otherwise use 0
+    if(length(station_index) > 0) {
+        scl_wwtp_index_winter2[i] <- wwtp_over_winter2$intensity_index[station_index] / wwtp_index_winter2
+    } else {
+        scl_wwtp_index_winter2[i] <- 0  # No data for this station in winter period
+        warning(paste("No winter data found for station:", wwtp_names[i]))
+    }
+}
+
+# Print the scaling values for debugging
+print("Winter scaling values:")
+print(data.frame(Station = wwtp_names, ScalingFactor = scl_wwtp_index_winter2))
+
+# 2) Combine individual exposure values
+wwtp_exp <- wwtp_ASJ * scl_wwtp_index_winter2[1] +
+            wwtp_PS  * scl_wwtp_index_winter2[2] +
+            wwtp_SC  * scl_wwtp_index_winter2[3] +
+            wwtp_SLB * scl_wwtp_index_winter2[4] +
+            wwtp_SJB * scl_wwtp_index_winter2[5] +
+            wwtp_SF  * scl_wwtp_index_winter2[6] +
+            wwtp_T   * scl_wwtp_index_winter2[7]
+wwtp_exp <- wwtp_exp / max(values(wwtp_exp), na.rm = TRUE)
+wwtp_exp[wwtp_exp == 0] <- NA
+
+# 3) Plot the exposure in the system for winter season (Jan 15 - Mar 7)
+# First plot: Relative contribution bar chart
+
+barplot(
+  scl_wwtp_index_winter2,
+  names.arg = c("ASJ", "PS", "SC", "SLB", "SJB", "SF", "T"),
+  ylim = c(0, 1),
+  main = "Relative contribution of each WWTP (Jan 15 - Mar 7)",
+  ylab = "Relative contribution",
+  xlab = "WWTP"
+)
+
+# Second plot: Spatial distribution
+
+plot(
+  wwtp_exp,
+  main = "WWTP exposure map (Dec first- Apr first)"
+)
+
+# Add points and labels for stations
+points(pts_wwtp_ASJ); text(st_coordinates(pts_wwtp_ASJ), "ASJ", pos = 1)
+points(pts_wwtp_PS);  text(st_coordinates(pts_wwtp_PS),  "PS",  pos = 1)
+points(pts_wwtp_SC);  text(st_coordinates(pts_wwtp_SC),  "SC",  pos = 1)
+points(pts_wwtp_SF);  text(st_coordinates(pts_wwtp_SF),  "SF",  pos = 1)
+points(pts_wwtp_SJB); text(st_coordinates(pts_wwtp_SJB), "SJB", pos = 3)
+points(pts_wwtp_SLB); text(st_coordinates(pts_wwtp_SLB), "SLB", pos = 2)
+points(pts_wwtp_T);   text(st_coordinates(pts_wwtp_T),   "T",   pos = 3)
+
+# Optional: Create a comparison with the full year data
+# Create a data frame for comparison
+comparison_df <- data.frame(
+  Station = c("ASJ", "PS", "SC", "SLB", "SJB", "SF", "T"),
+  Full_Year = scl_wwtp_index,
+  Winter_Period = scl_wwtp_index_winter2
+)
+
+# Create a side-by-side barplot for comparison
+
+barplot(
+  t(as.matrix(comparison_df[, c("Full_Year", "Winter_Period")])),
+  beside = TRUE,
+  names.arg = comparison_df$Station,
+  col = c("darkblue", "lightblue"),
+  legend.text = c("Full Year", "Dec first - Apr first"),
+  main = "WWTP Contribution: Full Year vs. Winter Period",
+  ylab = "Relative contribution"
+)
+```
+
+# Non-winter time 2 (non_iced period)
+
+The same approach for non-winter time
+
+```{r wwtp based on overflew index by non-winter2 period}
+# Convert X1900.01.00 to proper date format and filter 
+file_over_nonwinter2 <- file_over %>%
+  # Convert the date string to actual Date type
+  mutate(Date = as.Date(X1900.01.00)) %>%
+  # Create month and day columns for filtering
+  mutate(
+    Month = lubridate::month(Date),
+    Day = lubridate::day(Date)
+  ) %>%
+  
+  # Filter for dates NOT between Dec 1 and Apr 1 (rest of year)
+filter(
+  (Month == 4 & Day > 1) |  # April 2-30
+  (Month >= 5 & Month <= 11)  # May through November
+)
+
+# Calculate intensity index for the filtered non-winter season data
+file_over_index_nonwinter2 <- file_over_nonwinter2 %>%
+  mutate(
+    intensity_index = (Durée.de.débordement..minutes. * 
+                     Débit.passant.par.l.ouvrage..m3.jour. * 
+                     `Débit.passant.par.l.ouvrage....`) / 1440
+  )
+
+# Group by station name and summarize the non-winter season data
+wwtp_over_nonwinter2 <- file_over_index_nonwinter2 %>% 
+  group_by(Nom.de.la.station.d.épuration) %>%
+  summarise(
+    Taille.de.la.station = first(Taille.de.la.station.d.épuration),
+    Nombre.de.débordements = n(),
+    # Volume.des.débordements = sum(Volume.de.débordement..m.., na.rm = TRUE),
+    # Durée.des.débordements = sum(Durée.de.débordement..minutes., na.rm = TRUE),
+    intensity_index = sum(intensity_index, na.rm = TRUE)
+  )
+
+# Print out the stations in both dataframes to debug
+print("Stations in wwtp_names:")
+print(wwtp_names)
+print("Stations in wwtp_over_nonwinter2:")
+print(wwtp_over_nonwinter2$Nom.de.la.station.d.épuration)
+
+# Rescale WWTP exposure values
+# 1) Rescale based on the index intensity 
+wwtp_index_nonwinter2 <- sum(wwtp_over_nonwinter2$intensity_index)
+scl_wwtp_index_nonwinter2 <- rep(0, length(wwtp_names))
+for (i in 1:length(wwtp_names)) {
+    # Find matching station in the GROUPED data frame
+    station_index <- which(wwtp_over_nonwinter2$Nom.de.la.station.d.épuration == wwtp_names[i])
+    
+    # If station exists in the non-winter data, get its intensity index, otherwise use 0
+    if(length(station_index) > 0) {
+        scl_wwtp_index_nonwinter2[i] <- wwtp_over_nonwinter2$intensity_index[station_index] / wwtp_index_nonwinter2
+    } else {
+        scl_wwtp_index_nonwinter2[i] <- 0  # No data for this station in non-winter period
+        warning(paste("No non-winter2 data found for station:", wwtp_names[i]))
+    }
+}
+
+# Print the scaling values for debugging
+print("Non-winter2 scaling values:")
+print(data.frame(Station = wwtp_names, ScalingFactor = scl_wwtp_index_nonwinter2))
+
+# 2) Combine individual exposure values
+wwtp_exp_nonwinter2 <- wwtp_ASJ * scl_wwtp_index_nonwinter2[1] +
+                       wwtp_PS  * scl_wwtp_index_nonwinter2[2] +
+                       wwtp_SC  * scl_wwtp_index_nonwinter2[3] +
+                       wwtp_SLB * scl_wwtp_index_nonwinter2[4] +
+                       wwtp_SJB * scl_wwtp_index_nonwinter2[5] +
+                       wwtp_SF  * scl_wwtp_index_nonwinter2[6] +
+                       wwtp_T   * scl_wwtp_index_nonwinter2[7]
+wwtp_exp_nonwinter2 <- wwtp_exp_nonwinter2 / max(values(wwtp_exp_nonwinter2), na.rm = TRUE)
+wwtp_exp_nonwinter2[wwtp_exp_nonwinter2 == 0] <- NA
+
+# 3) Plot the exposure in the system for non-winter season 
+# First plot: Relative contribution bar chart
+
+barplot(
+  scl_wwtp_index_nonwinter2,
+  names.arg = c("ASJ", "PS", "SC", "SLB", "SJB", "SF", "T"),
+  ylim = c(0, 1),
+  main = "Relative contribution of each WWTP (Nov 30 - Apr 2)",
+  ylab = "Relative contribution",
+  xlab = "WWTP"
+)
+
+# Second plot: Spatial distribution
+
+plot(
+  wwtp_exp_nonwinter2,
+  main = "WWTP exposure map (Nov 30 - Apr 2)"
+)
+
+# Add points and labels for stations
+points(pts_wwtp_ASJ); text(st_coordinates(pts_wwtp_ASJ), "ASJ", pos = 1)
+points(pts_wwtp_PS);  text(st_coordinates(pts_wwtp_PS),  "PS",  pos = 1)
+points(pts_wwtp_SC);  text(st_coordinates(pts_wwtp_SC),  "SC",  pos = 1)
+points(pts_wwtp_SF);  text(st_coordinates(pts_wwtp_SF),  "SF",  pos = 1)
+points(pts_wwtp_SJB); text(st_coordinates(pts_wwtp_SJB), "SJB", pos = 3)
+points(pts_wwtp_SLB); text(st_coordinates(pts_wwtp_SLB), "SLB", pos = 2)
+points(pts_wwtp_T);   text(st_coordinates(pts_wwtp_T),   "T",   pos = 3)
+
+# Compare all three periods (full year, winter, non-winter)
+comparison_all_df <- data.frame(
+  Station = c("ASJ", "PS", "SC", "SLB", "SJB", "SF", "T"),
+  Full_Year = scl_wwtp_index,
+  Winter = scl_wwtp_index_winter2,
+  Non_Winter = scl_wwtp_index_nonwinter2
+)
+
+# Plot a side-by-side comparison of all three periods
+
+barplot(
+  t(as.matrix(comparison_all_df[, c("Full_Year", "Winter", "Non_Winter")])),
+  beside = TRUE,
+  names.arg = comparison_all_df$Station,
+  col = c("darkblue", "lightblue", "skyblue"),
+  legend.text = c("Full Year", "Dec 1 - Apr 1", "Nov 30 - Apr 2"),
+  main = "WWTP Contribution: Seasonal Comparison2",
+  ylab = "Relative contribution"
+)
+```
+

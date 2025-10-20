@@ -1,0 +1,628 @@
+---
+title: "navigation"
+author: "Hediyeh"
+date: "2025-06-03"
+output: html_document
+---
+# Navigation Intensity Assessment
+
+## Introduction to Maritime Traffic in the Study Area
+
+Navigation intensity within the study area was assessed using **Automatic Identification System (AIS)** satellite data formatted by Maerospace Corporation and acquired for the Canadian Space Agency (Canada, 2020a, 2020b). 
+
+## Data Transformation and Segmentation
+
+**Individual Location Processing**
+
+Individual location data were transformed into linear navigation segments representing continuous individual vessel transits, assuming straight-line transit between successive locations. Vessels were identified through their **Maritime Mobile Service Identity (MMSI)** number. For each vessel, all available locations were used to trace their movements within the study area.
+
+**Segmentation Methodology**
+
+Since vessels can enter and exit the study area, or remain docked for extended periods, vessel movements were segmented into multiple individual linear segments. Segmentation was performed when two consecutive locations were:
+
+* Separated by more than **5 hours**, or
+* Distant by more than **80.5 km**
+
+Linear segments overlapping terrestrial areas at a distance greater than **2 km** were removed from the database. This arbitrary distance of 2 km was used to remove aberrant segments from the database while preserving segments describing coastal navigation or vessels frequenting port facilities. 
+
+## Vessel Categorization and Main Shipping Corridors
+
+Since multiple types of vessels navigate the waters of the St. Lawrence and Saguenay, we considered **11 different vessel categories** to complete the navigation intensity assessment within the study area. The vessel categories included:
+
+* Cargo vessels
+* Dry bulk carriers
+* Tanker vessels  
+* Container ships
+* Passenger ferries and RO-RO vessels
+* Pleasure craft
+* Tugs and port service vessels
+* Government and research vessels
+* Special purpose ships
+* Marine mammal observation vessels
+* Port navigation activities
+
+**Main Corridor Identification**
+
+For each vessel type, main shipping corridors were identified using a **percentile-based threshold approach**. We selected areas representing the **top 25% of navigation activity** (75th percentile) for each vessel category to focus on the most intensively used shipping routes. This approach ensures that exposure calculations are based on actual high-traffic corridors rather than sporadic vessel movements.
+
+## Navigation Intensity Index and Exposure Modeling
+
+**Methodology**
+
+To characterize navigation exposure, we used a **spatial decay model** that accounts for the diminishing effects of shipping activity with distance from main corridors. Each identified corridor was treated as a point source of shipping-related disturbance, with effects radiating outward according to cost-distance principles.
+
+**Exposure Calculation Framework**
+
+For each vessel category, we calculated individual exposure fields using the **RelativeExposure function** with the following parameters:
+
+* **Decay type III** (a = -0.001) to represent medium-range shipping effects including noise pollution and water disturbance
+* **200m grid resolution** for detailed spatial analysis
+* **Cost-distance modeling** incorporating bathymetric constraints on effect propagation
+
+**Water-Specific Transition Function**
+
+A specialized transition function was developed for maritime shipping effects that ensures shipping effects propagate efficiently through water but are blocked by land masses. This function assigns:
+
+* **High conductance (0.9)** when both points are in water
+* **Very low conductance (0.001)** when one or both points are on land
+* **Medium conductance (0.5)** at water-land boundaries
+
+## Combined Exposure Assessment
+
+**Individual Vessel Type Processing**
+
+Each of the **11 vessel categories** was processed separately to generate individual exposure fields. This approach allows for:
+
+* **Category-specific impact assessment**
+* **Identification of dominant shipping stressors** in different areas
+* **Flexible weighting** of different vessel types if needed
+
+**Exposure Integration**
+
+The final combined shipping exposure was calculated by **summing all individual vessel type exposures**. This additive approach assumes that shipping effects from different vessel types are **cumulative** rather than antagonistic or synergistic.
+
+## Marine Mammal Observation Activities
+
+Marine mammal observation activities were included as one of the 11 vessel categories using the same **AIS-based corridor identification approach**. The **75th percentile threshold** was applied to observation vessel activity data to identify the most frequently used whale watching routes within the study area. This approach provides a consistent methodology across all vessel types while capturing the spatial pattern of commercial whale watching operations.
+
+## Port Zone Navigation
+
+Port zone navigation was characterized by applying **200m buffer zones** around identified port facilities (Ministère des Transports du Québec, 2021) and industrial-port zones (Ministère de l'Économie et de l'Innovation, 2021) in Quebec. A total of **53,386 transits** were recorded in port zones between 2017 and 2019. These data were integrated into the study area using the same corridor identification and exposure modeling approach as other vessel categories.
+
+## Management and Conservation Implications
+
+This methodology provides a comprehensive assessment of navigation intensity within the study area using **scientifically-consistent corridor identification** and **standardized exposure modeling** across all vessel categories. The resulting maps characterize the spatial distribution of maritime activities and provide essential input data for **cumulative impact assessments** of human activities on marine ecosystems.
+
+The assessment reveals the complex patterns of maritime traffic that may impact benthic communities through:
+
+* Physical disturbance from vessel wakes
+* Underwater noise pollution  
+* Chemical contamination from fuel and ballast water
+* Habitat fragmentation from shipping corridors
+
+This spatial framework is critical for implementing ecosystem-based management approaches and identifying priority areas for shipping traffic management.
+
+```{r start}
+
+# ===============================================================================
+# MARINE SHIPPING TRAFFIC EXPOSURE ANALYSIS - SAGUENAY FJORD
+# ===============================================================================
+# Analysis of shipping traffic as an in-water environmental stressor
+# Using RelativeExposure function to model spatial decay of shipping effects
+
+library(sf)
+library(raster)
+library(gdistance)
+library(dplyr)
+
+# ===============================================================================
+# STEP 1: LOAD AND PROCESS SHIPPING DATA
+# ===============================================================================
+navigation <- st_read("st_navigation.geojson")
+
+# ===============================================================================
+# MARINE SHIPPING TRAFFIC EXPOSURE ANALYSIS - SAGUENAY FJORD
+# ===============================================================================
+# Proper approach: Individual vessel type exposures from main shipping corridors
+# Then sum all vessel types for final combined exposure
+
+library(sf)
+library(raster)
+library(gdistance)
+library(dplyr)
+
+# ===============================================================================
+# STEP 1: LOAD AND IDENTIFY MAIN SHIPPING CORRIDORS
+# ===============================================================================
+
+# Define target CRS and Saguenay extent
+target_crs <- "+proj=utm +zone=19 +datum=WGS84 +units=m +no_defs"
+xmin <- 345000
+ymin <- 5325000
+xmax <- 450000
+ymax <- 5370000
+
+# Transform navigation data to UTM and crop to Saguenay
+navigation_utm <- st_transform(navigation, crs = target_crs)
+
+saguenay_bbox_utm <- st_bbox(c(xmin = xmin, ymin = ymin, xmax = xmax, ymax = ymax),
+                             crs = st_crs(target_crs)) %>%
+  st_as_sfc()
+
+navigation_saguenay <- st_crop(navigation_utm, saguenay_bbox_utm)
+
+print(paste("Total navigation grid cells in Saguenay:", nrow(navigation_saguenay)))
+
+```
+
+```{r loading data}
+# ===============================================================================
+# STEP 2: IDENTIFY MAIN SHIPPING CORRIDORS FOR EACH VESSEL TYPE
+# ===============================================================================
+
+# Define individual vessel types and their intensity thresholds
+vessel_types <- list(
+  CARGO = "CARGO",
+  DRY_BULK = "DRY.BULK", 
+  TANKER = "TANKER",
+  CONTAINER = "CONTAINER",
+  PASSENGER_FERRY = "PASSENGER.FERRY.RO.RO",
+  PLEASURE_VESSELS = "PLEASURE.VESSELS",
+  TUGS_PORT = "TUGS.PORT",
+  GOVERNMENT_RESEARCH = "GOVERNMENT.RESEARCH",
+  SPECIAL_SHIPS = "SPECIAL.SHIPS", 
+  PORT = "navigation_portuaire",
+  MARIN_MEMMAL = "Observation"
+)
+
+# Function to identify main corridors for each vessel type
+identify_shipping_corridors <- function(data, vessel_column, percentile_threshold = 0.75) {
+  
+  # Get vessel activity data
+  vessel_data <- data[!is.na(data[[vessel_column]]), ]
+  vessel_values <- vessel_data[[vessel_column]]
+  vessel_values <- vessel_values[vessel_values > 0]
+  
+  if (length(vessel_values) == 0) {
+    return(NULL)
+  }
+  
+  # Calculate threshold for main corridors
+  threshold <- quantile(vessel_values, percentile_threshold, na.rm = TRUE)
+  
+  # Filter to main corridors only
+  corridors <- vessel_data %>%
+    filter(.data[[vessel_column]] >= threshold) %>%
+    mutate(intensity_index = .data[[vessel_column]]) %>%
+    st_centroid()  # Convert to point sources
+  
+  print(paste(vessel_column, "corridors:", nrow(corridors), "sources, threshold:", round(percentile_threshold, 2)))
+  
+  return(corridors)
+}
+
+# Use consistent threshold for all vessel types (more scientific)
+threshold <- 0.75  # Top 25% of activity for all vessel types
+
+# Identify corridors for each vessel type
+shipping_corridors <- list()
+for (vessel_name in names(vessel_types)) {
+  vessel_col <- vessel_types[[vessel_name]]
+  corridors <- identify_shipping_corridors(navigation_saguenay, vessel_col, 0.75)
+  
+  if (!is.null(corridors) && nrow(corridors) > 0) {
+    shipping_corridors[[vessel_name]] <- corridors
+  }
+}
+
+print("Main shipping corridors identified for each vessel type with custom thresholds")
+```
+
+
+```{r grids function}
+# ===============================================================================
+# STEP 3: SETUP BATHYMETRY AND TRANSITION LAYER
+# ===============================================================================
+
+# Load bathymetry data
+bathy <- raster("bathy.tif")
+bathy_utm <- projectRaster(bathy, crs = target_crs)
+saguenay_extent <- extent(xmin, xmax, ymin, ymax)
+bathy_proj <- crop(bathy_utm, saguenay_extent)
+
+# Reduce resolution of bathymetry raster
+bathy_200 <- projectRaster(bathy_proj, crs = target_crs, res = c(200, 200))
+bathy_200[bathy_200 > 0] <- 0
+
+# Create water mask
+water_mask <- bathy_200
+water_mask[water_mask < 0] <- -1  # Water areas
+water_mask[water_mask >= 0] <- 0  # Land areas
+
+# Define transition function for shipping (modified for water movement)
+fun_shipping <- function(x) {
+  # In water: shipping effects spread more easily
+  # On land: shipping effects don't spread
+  ifelse(x[1] < 0 & x[2] < 0,  # Both points in water
+         0.9,                   # High conductance in water
+         ifelse(x[1] >= 0 | x[2] >= 0,  # One or both on land
+                0.001,          # Very low conductance on land
+                0.5))           # Medium conductance at water-land boundary
+}
+
+# Create transition layer for shipping effects
+tr_shipping <- transition(bathy_200,
+                         transitionFunction = fun_shipping,
+                         directions = 8,
+                         symm = FALSE) %>%
+  geoCorrection(., type = "c")
+
+print("Transition layer created")
+
+# ===============================================================================
+# STEP 5: SETUP GRID SYSTEM 
+# ===============================================================================
+
+# Create grid for exposure calculation
+bbox_utm <- list(rbind(c(xmin, ymin), c(xmax, ymin), c(xmax, ymax),
+                       c(xmin, ymax), c(xmin, ymin))) %>%
+  st_polygon() %>%
+  st_sfc(., crs = target_crs)
+
+grid_res <- 200
+grid_polygons <- st_make_grid(bbox_utm, cellsize = grid_res, what = "polygons") %>%
+  st_geometry()
+grid_points <- st_make_grid(bbox_utm, cellsize = grid_res, what = "centers") %>%
+  st_geometry()
+
+grid_points_sf <- st_sf(geometry = grid_points)
+grid_polygons_sf <- st_sf(geometry = grid_polygons)
+
+print(paste("Total grid points:", nrow(grid_points_sf)))
+
+# ===============================================================================
+# STEP 6: RELATIVEXPOSURE FUNCTION 
+# ===============================================================================
+
+RelativeExposure <- function(source, transition, decay_type, grid_points_sf,
+                             grid_polygons_sf, empty_raster) {
+  
+  # Verify input CRS match
+  if (!identical(st_crs(source), st_crs(grid_points_sf))) {
+    stop("CRS mismatch between source and grid points")
+  }
+  
+  # Calculate cost distance with error handling
+  tryCatch({
+    # Convert source to spatialpoints 
+    source_coords <- st_coordinates(source)
+    source_sp <- SpatialPoints(coords = source_coords,
+                              proj4string = CRS(st_crs(source)$proj4string))
+    
+    # Convert grid points to SpatialPoints  
+    grid_points_sp <- as(grid_points_sf, "Spatial")
+    
+    print(paste("Calculating distances from", nrow(source_sp), "sources to",
+                nrow(grid_points_sp), "grid points..."))
+    
+    # Calculate cost distance
+    distance <- costDistance(transition, grid_points_sp, source_sp)
+    
+    if (all(is.na(distance))) {
+      stop("All distance values are NA")
+    }
+    
+    # Find minimum distance to any source
+    if (ncol(distance) == 1) {
+      min_dist <- distance[, 1]
+    } else {
+      min_dist <- apply(distance, 1, min, na.rm = TRUE)
+    }
+    
+    # Calculate decay parameter
+    a_param <- switch(decay_type,
+                     "I"   = -1,
+                     "II"  = -0.1,
+                     "III" = -0.01,
+                     "IV"  = -0.001,
+                     stop("Invalid decay type"))
+    
+    # Compute exposure values
+    exposure <- exp((0.000025 * a_param) * (min_dist)^2)
+    
+    # Create exposure raster
+    coords <- st_coordinates(grid_points_sf)
+    sp_exposure <- SpatialPointsDataFrame(
+      coords = coords,
+      data = data.frame(exposure = exposure),
+      proj4string = CRS(st_crs(empty_raster)$proj4string)
+    )
+    
+    # Rasterize exposure values
+    exposure_rast <- rasterize(sp_exposure, empty_raster,
+                              field = "exposure", fun = mean, background = NA)
+    
+    # Normalize exposure values
+    max_value <- cellStats(exposure_rast, stat = "max", na.rm = TRUE)
+    if (!is.na(max_value) && max_value > 0) {
+      exposure_rast[] <- exposure_rast[] / max_value
+    }
+    
+    return(exposure_rast)
+    
+  }, error = function(e) {
+    stop("Error in exposure calculation: ", e$message)
+  })
+}
+```
+
+```{r vessel type exposure}
+# ===============================================================================
+# STEP 6: CALCULATE INDIVIDUAL VESSEL TYPE EXPOSURES
+# ===============================================================================
+
+# Create template raster
+template_raster <- raster(extent(bathy_200), resolution = 200,
+                          crs = projection(bathy_200))
+
+# Set decay type for shipping (long-range effects like noise)
+decay_type <- "III"
+
+# Calculate exposure for each vessel type
+vessel_exposures <- list()
+
+print("Calculating individual vessel type exposures...")
+
+for (vessel_name in names(shipping_corridors)) {
+  
+  print(paste("Processing", vessel_name, "exposure..."))
+  
+  corridors <- shipping_corridors[[vessel_name]]
+  
+  # Calculate exposure for this vessel type
+  vessel_exp <- RelativeExposure(
+    source = corridors,
+    transition = tr_shipping,
+    decay_type = decay_type,
+    grid_points_sf = grid_points_sf,
+    grid_polygons_sf = grid_polygons_sf,
+    empty_raster = template_raster)
+  
+  # Apply water mask
+  vessel_exp <- mask(vessel_exp, water_mask < 0)
+  vessel_exp[vessel_exp == 0] <- NA
+  
+  # Store in list
+  vessel_exposures[[vessel_name]] <- vessel_exp
+  
+  print(paste(vessel_name, "exposure calculated"))
+}
+
+# ===============================================================================
+# ===============================================================================
+# STEP 7: COMBINE ALL VESSEL TYPE EXPOSURES WITH INTENSITY WEIGHTING
+# ===============================================================================
+print("Calculating vessel type intensity weights...")
+
+# Calculate total intensity for each vessel type
+vessel_total_intensity <- list()
+for (vessel_name in names(shipping_corridors)) {
+  total_intensity <- sum(shipping_corridors[[vessel_name]]$intensity_index, na.rm = TRUE)
+  vessel_total_intensity[[vessel_name]] <- total_intensity
+  print(paste(vessel_name, "total intensity:", round(total_intensity, 2)))
+}
+
+# Calculate overall total intensity across all vessel types
+total_shipping_intensity <- sum(unlist(vessel_total_intensity), na.rm = TRUE)
+print(paste("Total shipping intensity across all vessel types:", round(total_shipping_intensity, 2)))
+
+# Calculate weight for each vessel type
+vessel_weights <- list()
+for (vessel_name in names(vessel_total_intensity)) {
+  weight <- vessel_total_intensity[[vessel_name]] / total_shipping_intensity
+  vessel_weights[[vessel_name]] <- weight
+  print(paste(vessel_name, "weight:", round(weight, 4)))
+}
+
+# Combine all vessel type exposures with weighting
+print("Combining all vessel type exposures with intensity weighting...")
+combined_exposure <- template_raster
+combined_exposure[] <- 0
+
+for (vessel_name in names(vessel_exposures)) {
+  vessel_raster <- vessel_exposures[[vessel_name]]
+  weight <- vessel_weights[[vessel_name]]
+  
+  # Weight this vessel type's exposure
+  weighted_raster <- vessel_raster * weight
+  
+  # Replace NA with 0 for addition
+  weighted_raster[is.na(weighted_raster)] <- 0
+  
+  # Add to combined exposure
+  combined_exposure <- combined_exposure + weighted_raster
+  
+  print(paste("Added", vessel_name, "with weight", round(weight, 4)))
+}
+
+# Apply water mask to combined result
+combined_exposure <- mask(combined_exposure, water_mask < 0)
+
+# Normalize combined exposure (0-1 scale)
+max_combined <- cellStats(combined_exposure, stat = "max", na.rm = TRUE)
+if (!is.na(max_combined) && max_combined > 0) {
+  combined_exposure_norm <- combined_exposure / max_combined
+} else {
+  combined_exposure_norm <- combined_exposure
+}
+
+# Set 0 values to NA for visualization
+combined_exposure_norm[combined_exposure_norm == 0] <- NA
+
+print("Combined shipping exposure with intensity weighting calculated!")
+print("\n=== VESSEL TYPE CONTRIBUTIONS ===")
+for (vessel_name in names(vessel_weights)) {
+  print(paste(vessel_name, ":", round(vessel_weights[[vessel_name]] * 100, 2), "%"))
+}
+# ===============================================================================
+# STEP 8: SAVE RESULTS
+# ===============================================================================
+
+# Save individual vessel exposures
+for (vessel_name in names(vessel_exposures)) {
+  filename <- paste0("shipping_exposure_", vessel_name, ".tif")
+  writeRaster(vessel_exposures[[vessel_name]], filename, overwrite = TRUE)
+}
+
+# Save combined exposure
+writeRaster(combined_exposure_norm, "shipping_exposure_combined_saguenay.tif", overwrite = TRUE)
+
+# Save R workspace
+save(vessel_exposures, combined_exposure_norm, shipping_corridors,
+     file = "shipping_exposure_all_vessels.RData")
+
+print("All results saved!")
+```
+
+```{r plot}
+# ===============================================================================
+# STEP 9: PLOT RESULTS
+# ===============================================================================
+png("shipping traffic III.png")
+# Plot combined shipping exposure
+plot(combined_exposure_norm,
+     main = "Marine Shipping Traffic Exposure\nSaguenay Fjord (All Vessel Types) type III",
+     xlab = "Easting (UTM Zone 19N)", 
+     ylab = "Northing (UTM Zone 19N)",
+     axes = TRUE)
+# Add scale bar
+scalebar(d = 10000,  # distance in meters (adjust based on your map size)
+         xy = NULL,   # NULL = bottom left corner
+         type = "bar",
+         divs = 2,
+         below = "km",
+         label = c(0, 5, 10))
+dev.off
+```
+
+```{r all indivitual vessel type plot }
+# Plot ALL individual vessel type exposures
+all_vessels <- names(vessel_exposures)
+n_vessels <- length(all_vessels)
+
+if (n_vessels > 0) {
+  # Calculate optimal grid layout for all vessels
+  if (n_vessels <= 4) {
+    nrows <- 2
+    ncols <- 2
+  } else if (n_vessels <= 6) {
+    nrows <- 2
+    ncols <- 3
+  } else if (n_vessels <= 9) {
+    nrows <- 3
+    ncols <- 3
+  } else {
+    nrows <- ceiling(sqrt(n_vessels))
+    ncols <- ceiling(n_vessels / nrows)
+  }
+  
+  # Adjust margins for better title visibility
+par(mfrow = c(nrows, ncols), mar = c(3, 2, 2, 1), oma = c(0, 0, 0, 0))
+
+# Plot each vessel type exposure
+for (vessel_name in all_vessels) {
+  plot(vessel_exposures[[vessel_name]],
+       main = vessel_name,  # Remove "Exposure" to save space
+       axes = TRUE,
+       cex.main = 0.7,     # Smaller font
+       cex.axis = 0.6,     # Smaller axis labels
+       mgp = c(1.5, 0.5, 0))  # Bring title closer to plot
+}
+  
+  par(mfrow = c(1, 1))
+par(mar = c(5, 4, 4, 2) + 0.1)  # Reset to default margins
+
+# Plot shipping corridors on combined exposure
+par(mar = c(5, 4, 4, 8))  # Increase right margin (last number) for legend space
+
+plot(combined_exposure_norm,
+     main = "Shipping Corridors and Combined Exposure",
+     xlab = "Easting (UTM Zone 19N)", 
+     ylab = "Northing (UTM Zone 19N)",
+     axes = TRUE)
+
+# Sort vessel types by number of points (ascending order)
+corridor_counts <- sapply(shipping_corridors, nrow)
+sorted_vessels <- names(sort(corridor_counts))
+
+# Use distinct colors
+colors <- rainbow(length(shipping_corridors))
+names(colors) <- names(shipping_corridors)
+
+print("Plotting vessels in order (fewest to most points):")
+for (vessel_name in sorted_vessels) {
+  corridors <- shipping_corridors[[vessel_name]]
+  color <- colors[vessel_name]
+  
+  cat(paste("Plotting", vessel_name, ":", nrow(corridors), "points\n"))
+  points(corridors, pch = 16, cex = 0.5, col = color)
+}
+
+# Add legend OUTSIDE the plot area
+par(xpd = TRUE)  # Allow drawing outside plot area
+
+legend(x = par("usr")[2] + 0.02 * (par("usr")[2] - par("usr")[1]),  # Position outside right edge
+       y = par("usr")[4],  # Top of plot
+       legend = names(shipping_corridors),
+       col = colors[1:length(shipping_corridors)],
+       pch = 16,
+       cex = 0.7,
+       bg = "white",
+       xjust = 0)  # Left-justify the legend
+
+par(xpd = FALSE)  # Reset to default
+par(mar = c(5, 4, 4, 2) + 0.1)  # Reset margins to default
+}
+
+```
+
+
+
+```{r summary}
+# ===============================================================================
+# STEP 10: SUMMARY STATISTICS
+# ===============================================================================
+
+print("=== SHIPPING EXPOSURE ANALYSIS SUMMARY ===")
+print(paste("Study area: Saguenay Fjord"))
+
+print("\nVessel type corridor counts:")
+for (vessel_name in names(shipping_corridors)) {
+  count <- nrow(shipping_corridors[[vessel_name]])
+  print(paste(vessel_name, ":", count, "corridor sources"))
+}
+
+print("\nCombined exposure statistics:")
+print(summary(getValues(combined_exposure_norm)))
+
+print("\n=== METHODOLOGY ===")
+print("1. Identified main shipping corridors for each vessel type (top 25% activity)")
+print("2. Calculated separate exposures for each vessel type using RelativeExposure")
+print("3. Combined all vessel type exposures into final exposure map")
+print("4. Applied decay type IV for long-range shipping effects (noise, pollution)")
+
+print("\n=== ANALYSIS COMPLETE ===")
+print("Result: Realistic shipping exposure from actual traffic corridors")
+```
+
+## References
+
+Canada. (2020a). *AIS satellite data acquisition program*. Canadian Space Agency.
+
+Canada. (2020b). *Maritime domain awareness through satellite AIS*. Canadian Space Agency.
+
+Ministère de l'Économie et de l'Innovation. (2021). *Industrial-port zones of Quebec*. Government of Quebec.
+
+Ministère des Transports du Québec. (2021). *Port facilities database*. Government of Quebec.
+
+Turgeon, S. (2019). *Marine mammal observation vessel activity in the Saguenay-St. Lawrence Marine Park, 2017*. Parks Canada.
