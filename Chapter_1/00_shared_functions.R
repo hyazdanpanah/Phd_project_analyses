@@ -15,7 +15,20 @@
 # ------------------------------------------------------------------------------
 # SECTION A: UNIVERSAL FUNCTIONS (ALL 6 STRESSORS USE THESE)
 # ------------------------------------------------------------------------------
+# ==============================================================================
+# REQUIRED PACKAGES - LOAD IN THIS ORDER
+# ==============================================================================
+library(raster)      # Load FIRST
+library(sf)
+library(dplyr)
+library(gdistance)
 
+# Prevent terra conflicts if loaded elsewhere (safer check)
+if ("package:terra" %in% search()) {
+  detach("package:terra", unload = TRUE)
+  library(raster)  # Reload raster to ensure proper namespace
+}
+# ==============================================================================
 # Standard CRS and extent
 target_crs <- "+proj=utm +zone=19 +datum=WGS84 +units=m +no_defs"
 xmin <- 345000
@@ -26,20 +39,23 @@ ymax <- 5370000
 # ------------------------------------------------------------------------------
 # A1. LOAD BATHYMETRY AND WATER MASK
 # ------------------------------------------------------------------------------
-load_bathymetry <- function(bathy_path = "Data/bathy.tif") {  # ← Added parameter
+# ------------------------------------------------------------------------------
+# A1. LOAD BATHYMETRY AND WATER MASK
+# ------------------------------------------------------------------------------
+load_bathymetry <- function(bathy_path = "Data/bathy.tif") {
   
   # Check if file exists
   if (!file.exists(bathy_path)) {
-    stop(paste("Cannot find bathy.tif at:", bathy_path, 
+    stop(paste("Cannot find bathy.tif at:", bathy_path,
                "\nCurrent directory:", getwd(),
                "\nPlease provide correct path."))
   }
   
-  bathy <- raster(bathy_path)
-  bathy_utm <- projectRaster(bathy, crs = target_crs)
+  bathy <- raster::raster(bathy_path)
+  bathy_utm <- raster::projectRaster(bathy, crs = target_crs)
   saguenay_extent <- raster::extent(xmin, xmax, ymin, ymax)
-  bathy_proj <- crop(bathy_utm, saguenay_extent)
-  bathy_200 <- projectRaster(bathy_proj, crs = target_crs, res = c(200, 200))
+  bathy_proj <- raster::crop(bathy_utm, saguenay_extent)
+  bathy_200 <- raster::projectRaster(bathy_proj, crs = target_crs, res = c(200, 200))
   bathy_200[bathy_200 > 0] <- 0
   
   # Create water mask
@@ -48,8 +64,8 @@ load_bathymetry <- function(bathy_path = "Data/bathy.tif") {  # ← Added parame
   water_mask[water_mask >= 0] <- 0  # Land
   
   # Convert to polygons
-  water_poly <- rasterToPolygons(water_mask, dissolve = TRUE,
-                                 fun = function(x) x == -1)
+  water_poly <- raster::rasterToPolygons(water_mask, dissolve = TRUE,
+                                         fun = function(x) x == -1)
   water_sf <- st_as_sf(water_poly)
   water_sf <- st_transform(water_sf, crs = target_crs)
   
@@ -59,7 +75,6 @@ load_bathymetry <- function(bathy_path = "Data/bathy.tif") {  # ← Added parame
     water_sf = water_sf
   ))
 }
-
 # ------------------------------------------------------------------------------
 # A2. CREATE GRID SYSTEM
 # ------------------------------------------------------------------------------

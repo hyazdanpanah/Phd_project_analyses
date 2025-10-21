@@ -1,0 +1,400 @@
+---
+title: "Agricultural Exposure in the Saguenay Fjord"
+author: "Hediyeh Yazdanpanah"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    code_folding: show
+    highlight: pygments
+    theme: yeti
+    toc: TRUE
+    toc_depth: 4
+    toc_float:
+      collapsed: TRUE
+      smooth_scroll: TRUE
+    df_print: paged
+    fig_caption: TRUE
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  warning = TRUE,
+  message = TRUE,
+  error = TRUE,
+  fig.width = 10,
+  fig.height = 8
+)
+
+# SET WORKING DIRECTORY TO WHERE THIS FILE IS
+knitr::opts_knit$set(root.dir = "/Users/hediyeh/Desktop/Phd_project_analyses/Chapter_1/Rmarkdown & Data/agriculture")
+
+# Load required packages
+library(sf)
+library(dplyr)
+library(raster)
+library(gdistance)
+library(RColorBrewer)
+library(readxl)
+library(here)
+
+# Source shared functions
+source("/Users/hediyeh/Desktop/Phd_project_analyses/Chapter_1/00_shared_functions.R")
+```
+
+# Introduction
+
+The Saguenay Fjord catchment basin supports significant agricultural activities that generate **$270 million in gross sales** and **2,400 jobs** (2010 data). Agriculture in the region is concentrated in the **western lowland areas** near waterways, creating direct pathways for agricultural runoff to enter the fjord system.
+
+This analysis quantifies the potential environmental impact of agricultural activities on the Saguenay Fjord through a watershed-based exposure model, using cultivated area as a proxy for agricultural intensity.
+
+## Agricultural Context
+
+### Spatial Distribution
+- **Total agricultural area**: 1,554.06 km²
+- **Number of enterprises**: 598 registered operations
+- **Key municipalities**: Saguenay City, Alma, and Saint-David-de-Falardeau (54.50% of cultivated land)
+
+### Production Types
+- **Cereals**: 340 enterprises, 18,869 hectares
+- **Forage crops**: 414 enterprises, 26,297 hectares  
+- **Wild blueberries**: 57 enterprises, 9,800 hectares
+- **Potatoes**: 32 enterprises, 1,992 hectares
+
+The proximity of agricultural operations to waterways combined with the concentrated spatial distribution makes agricultural runoff a priority stressor for cumulative impact assessment.
+
+## Methodology Overview
+
+1. **Watershed-Scale Aggregation**: Agricultural impacts aggregated at the watershed scale
+2. **River Mouth Sources**: Impact sources placed at hydrologically-accurate river mouth locations
+3. **Cultivated Area Proxy**: Total cultivated area used as proxy for agricultural intensity
+4. **Proportional Allocation**: Municipality-level data spatially allocated to watersheds
+
+# Data Loading
+
+## Base Data
+
+```{r load-base-data}
+# Load bathymetry and create water mask
+bathy_data <- load_bathymetry(bathy_path = "bathy.tif")
+bathy_200 <- bathy_data$bathy_200
+water_mask <- bathy_data$water_mask
+water_sf <- bathy_data$water_sf
+
+# Load watersheds
+watersheds <- load_watersheds(
+  watershed_path = "/Users/hediyeh/Desktop/Phd_project_analyses/Chapter_1/Rmarkdown & Data/agriculture/corrected_watersheds.gpkg"
+)
+```
+
+## Agricultural Data
+
+```{r load-agricultural-data}
+# Load municipality boundaries
+agriculture_munic <- st_read("munic_s.shp", quiet = TRUE)
+
+# Select relevant municipalities in the Saguenay catchment
+munic_selection <- c(
+  "L'Anse-Saint-Jean", "Petit-Saguenay", "Rivière-Éternité",
+  "Saguenay", "Saint-Félix-d'Otis", "Saint-Fulgence",
+  "Sacré-Coeur", "Sainte-Rose-du-Nord", "Ferland-et-Boilleau", "Alma",
+  "Baie-Sainte-Catherine", "Bégin", "Hébertville",
+  "Hébertville-Station", "L'Ascension-de-Notre-Seigneur", "Labrecque",
+  "Lamarche", "Larouche", "Saint-Ambroise", "Saint-Bruno",
+  "Saint-Charles-de-Bourget", "Saint-David-de-Falardeau", "Saint-Gédéon",
+  "Saint-Honoré", "Saint-Nazaire", "Saint-Siméon", "Tadoussac"
+)
+
+# Prepare municipality data
+munic_sf <- agriculture_munic %>%
+  filter(MUS_NM_MUN %in% munic_selection) %>%
+  select(municipalite = MUS_NM_MUN, geometry) %>%
+  st_transform(crs = target_crs)
+
+# Load cultivated area data
+agri_data <- read_excel("SF_agri_all.xlsx")
+
+# Merge spatial and attribute data
+data_agri_sf <- left_join(munic_sf, agri_data, by = "municipalite") %>%
+  st_transform(crs = target_crs)
+
+# Clean duplicate municipalities by combining geometries
+data_agri_sf <- data_agri_sf %>%
+  group_by(municipalite) %>%
+  summarise(
+    cultivated_area_ha = sum(`Estimated cultivated area in the zone`, na.rm = TRUE),
+    .groups = 'drop'
+  ) %>%
+  st_make_valid()
+```
+
+# River Mouth Detection
+
+```{r find-river-mouths}
+# Find river mouth locations using shared function
+river_mouths_sf <- find_river_mouths(watersheds, water_sf)
+```
+
+```{r plot-river-mouths, fig.cap="River mouth locations where watersheds enter the Saguenay Fjord"}
+# Visualize river mouths and watersheds
+plot_river_mouths_diagnostic(watersheds, river_mouths_sf, water_sf,
+                            xmin, xmax, ymin, ymax)
+```
+
+# Agricultural Impact Assessment
+
+## Watershed Allocation Method
+
+Agricultural activities are allocated to watersheds using proportional area methods:
+
+1. **Municipality-Watershed Intersection**: Calculate the area of each municipality within each watershed
+2. **Proportional Allocation**: Distribute municipality cultivated area proportionally to intersection areas
+3. **Watershed Aggregation**: Sum all allocated cultivated areas within each watershed
+4. **Intensity Index**: Normalize by watershed area to create comparable intensity metrics
+
+```{r process-watershed-agriculture}
+# Calculate municipality-watershed intersections
+watersheds_clean <- st_make_valid(watersheds)
+data_agri_sf <- st_make_valid(data_agri_sf)
+
+intersections <- st_intersection(data_agri_sf, watersheds_clean)
+
+# Calculate areas
+intersections$total_municipality_area_ha <- NA
+intersections$intersection_area_ha <- as.numeric(st_area(intersections)) / 10000
+
+# Calculate total area for each municipality
+for(i in 1:nrow(intersections)) {
+  muni_name <- intersections$municipalite[i]
+  muni_geom <- data_agri_sf[data_agri_sf$municipalite == muni_name, ]
+  
+  if(nrow(muni_geom) > 0) {
+    total_area <- as.numeric(st_area(muni_geom)) / 10000
+    intersections$total_municipality_area_ha[i] <- total_area
+  }
+}
+
+# Calculate proportional allocation
+intersections$municipality_proportion <- ifelse(
+  intersections$total_municipality_area_ha > 0,
+  intersections$intersection_area_ha / intersections$total_municipality_area_ha,
+  0
+)
+
+# Allocate cultivated area to watersheds
+intersections$cultivated_area_allocated_ha <- 
+  intersections$municipality_proportion * intersections$cultivated_area_ha
+
+# Aggregate by watershed
+watershed_agriculture <- intersections %>%
+  st_drop_geometry() %>%
+  group_by(RIVER_NAME) %>%
+  summarise(
+    total_cultivated_area_ha = sum(cultivated_area_allocated_ha, na.rm = TRUE),
+    num_municipalities = n(),
+    municipalities = paste(unique(municipalite), collapse = ", "),
+    .groups = 'drop'
+  ) %>%
+  arrange(desc(total_cultivated_area_ha))
+```
+
+## Calculate Intensity Index
+
+```{r calculate-intensity-index}
+# Add watershed areas and calculate intensity metrics
+watershed_agriculture <- watershed_agriculture %>%
+  mutate(watershed_area_ha = NA)
+
+# Calculate watershed areas
+for(i in 1:nrow(watershed_agriculture)) {
+  river_name <- watershed_agriculture$RIVER_NAME[i]
+  watershed_row <- watersheds[watersheds$RIVER_NAME == river_name, ]
+  
+  if(nrow(watershed_row) > 0) {
+    total_area <- as.numeric(st_area(watershed_row)) / 10000
+    watershed_agriculture$watershed_area_ha[i] <- total_area
+  }
+}
+
+# Calculate proportion cultivated (percentage)
+watershed_agriculture <- watershed_agriculture %>%
+  mutate(
+    proportion_cultivated = (total_cultivated_area_ha / watershed_area_ha) * 100
+  )
+
+# Create normalized intensity index (0-1)
+max_proportion <- max(watershed_agriculture$proportion_cultivated, na.rm = TRUE)
+
+watershed_agriculture <- watershed_agriculture %>%
+  mutate(
+    intensity_index = proportion_cultivated / max_proportion
+  )
+```
+
+```{r agriculture-summary-table}
+# Display top watersheds by intensity
+knitr::kable(
+  watershed_agriculture %>%
+    select(RIVER_NAME, total_cultivated_area_ha, proportion_cultivated, 
+           intensity_index, num_municipalities) %>%
+    arrange(desc(intensity_index)) %>%
+    head(10),
+  caption = "Top 10 Watersheds by Agricultural Intensity Index",
+  digits = 3,
+  col.names = c("Watershed", "Cultivated Area (ha)", "% Cultivated", 
+                "Intensity Index", "# Municipalities")
+)
+```
+
+## Prepare River Mouth Sources
+
+```{r prepare-river-sources}
+# Merge agriculture data with river mouths
+river_mouth_sources <- merge(river_mouths_sf, watershed_agriculture,
+                             by = "RIVER_NAME", all.x = TRUE)
+
+# Handle watersheds with no agriculture data
+river_mouth_sources$total_cultivated_area_ha[
+  is.na(river_mouth_sources$total_cultivated_area_ha)] <- 0
+river_mouth_sources$intensity_index[
+  is.na(river_mouth_sources$intensity_index)] <- 0
+
+# Filter active sources
+river_mouth_sources_active <- river_mouth_sources[
+  river_mouth_sources$intensity_index > 0, ]
+```
+
+```{r agriculture-stats}
+# Summary statistics
+cat("=== AGRICULTURAL INTENSITY STATISTICS ===\n")
+cat("Total watersheds processed:", nrow(watershed_agriculture), "\n")
+cat("Watersheds with agricultural activity:", nrow(river_mouth_sources_active), "\n")
+cat("Total cultivated area:", 
+    round(sum(watershed_agriculture$total_cultivated_area_ha, na.rm = TRUE), 1), 
+    "ha\n")
+cat("Mean intensity index:", 
+    round(mean(river_mouth_sources_active$intensity_index, na.rm = TRUE), 3), "\n")
+cat("Max intensity index:", 
+    round(max(river_mouth_sources_active$intensity_index, na.rm = TRUE), 3), "\n")
+```
+
+# Exposure Calculation
+
+## Setup Grid and Transition Layer
+
+```{r setup-exposure}
+# Create grid system
+grid_system <- create_grid_system(xmin, ymin, xmax, ymax, grid_res = 200)
+grid_points_sf <- grid_system$grid_points_sf
+grid_polygons_sf <- grid_system$grid_polygons_sf
+
+# Create transition layer
+tr_bathy <- create_transition_layer(bathy_200)
+
+# Create template raster
+template_raster <- raster(raster::extent(bathy_200),
+                         resolution = 200,
+                         crs = projection(bathy_200))
+```
+
+## Calculate Weighted Agricultural Exposure
+
+```{r calculate-agriculture-exposure}
+decay_type <- "III"
+
+# Calculate exposure for each river mouth separately
+river_exposures <- list()
+
+for(i in 1:nrow(river_mouth_sources_active)) {
+  river_name <- river_mouth_sources_active$RIVER_NAME[i]
+  intensity <- river_mouth_sources_active$intensity_index[i]
+  
+  cat("Processing", river_name, "- Intensity:", round(intensity, 4), "\n")
+  
+  # Calculate exposure for this single river mouth
+  single_exposure <- RelativeExposure(
+    source = river_mouth_sources_active[i,],
+    transition = tr_bathy,
+    decay_type = decay_type,
+    grid_points_sf = grid_points_sf,
+    empty_raster = template_raster
+  )
+  
+  # Weight by intensity index
+  river_exposures[[i]] <- single_exposure * intensity
+}
+
+# Combine all weighted exposures
+agri_exp <- Reduce('+', river_exposures)
+
+# Normalize to 0-1 scale
+max_value <- cellStats(agri_exp, stat = "max", na.rm = TRUE)
+agri_exp <- agri_exp / max_value
+
+# Apply water mask
+agri_exp <- mask(agri_exp, water_mask < 0)
+agri_exp[agri_exp == 0] <- NA
+```
+
+```{r exposure-stats}
+cat("=== AGRICULTURAL EXPOSURE STATISTICS ===\n")
+cat("Max exposure value:", round(max_value, 6), "\n")
+cat("Mean exposure:", 
+    round(cellStats(agri_exp, "mean", na.rm=TRUE), 6), "\n")
+cat("Non-NA cells:", sum(!is.na(values(agri_exp))), "\n")
+```
+
+# Results Visualization
+
+```{r plot-agriculture-exposure, fig.cap="Agricultural exposure in Saguenay Fjord using Level III decay"}
+plot_exposure(agri_exp, 
+              "Agricultural Exposure - Watershed-based (Level III)",
+              xmin, xmax, ymin, ymax)
+```
+
+# Save Results
+
+```{r save-results}
+# Save exposure raster and metadata
+save(agri_exp, 
+     river_mouth_sources_active,
+     watershed_agriculture,
+     file = "agriculture_exposure.RData")
+
+# Export as GeoTIFF
+writeRaster(agri_exp,
+            filename = "agriculture_exposure.tif",
+            overwrite = TRUE)
+```
+
+# Summary
+
+This agricultural exposure analysis successfully developed a watershed-based model to quantify agricultural impacts on the Saguenay Fjord ecosystem:
+
+**Key Features:**
+- **Hydrologically-Accurate**: River mouth sources precisely located where terrestrial inputs enter the fjord
+- **Cultivated Area Proxy**: Total cultivated area used as proxy for agricultural intensity
+- **Watershed-Scale Aggregation**: Agricultural impacts aggregated at watershed scale for realistic cumulative effects
+- **Proportional Allocation**: Municipality-level data spatially distributed to watersheds using area-weighted methods
+
+**Results:**
+- **`r nrow(river_mouth_sources_active)`** watersheds with active agricultural impacts
+- **`r round(sum(watershed_agriculture$total_cultivated_area_ha, na.rm=TRUE), 1)`** hectares of total cultivated area
+- **`r round(mean(river_mouth_sources_active$proportion_cultivated, na.rm=TRUE), 1)`%** mean proportion cultivated across active watersheds
+- **Level III decay** function applied for exposure gradient calculation
+
+**Dominant Contributors:**
+The **`r watershed_agriculture$RIVER_NAME[which.max(watershed_agriculture$intensity_index)]`** watershed shows the highest agricultural intensity, with **`r round(max(watershed_agriculture$proportion_cultivated, na.rm=TRUE), 1)`%** of its area under cultivation.
+
+# References
+
+Allan, J. D. (2004). Landscapes and riverscapes: the influence of land use on stream ecosystems. *Annual Review of Ecology, Evolution, and Systematics*, 35, 257-284.
+
+Observatoire du Saguenay (2015). Portrait du bassin versant du Saguenay - Chapitre 4: Activités agricoles. Retrieved from https://www.obvsaguenay.org/
+
+---
+
+**Session Info:**
+```{r session-info}
+sessionInfo()
+```
