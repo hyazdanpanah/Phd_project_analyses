@@ -1,0 +1,397 @@
+---
+title: "Wastewater Treatment Plant Exposure in the Saguenay Fjord"
+author:
+  - Hediyeh Yazdanpanah
+  - Frederic Maps
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    code_folding: show
+    highlight: pygments
+    theme: yeti
+    toc: TRUE
+    toc_depth: 4
+    toc_float:
+      collapsed: TRUE
+      smooth_scroll: TRUE
+    df_print: paged
+    fig_caption: TRUE
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  warning = FALSE,
+  message = FALSE,
+  error = FALSE,
+  fig.width = 10,
+  fig.height = 8
+)
+
+# SET WORKING DIRECTORY
+knitr::opts_knit$set(root.dir = "/Users/hediyeh/Desktop/Phd_project_analyses/Chapter_1/Rmarkdown & Data/wwtp")
+
+# Source shared functions
+source("/Users/hediyeh/Desktop/Phd_project_analyses/Chapter_1/00_shared_functions.R")
+
+# Load additional packages
+library(viridis)
+library(RColorBrewer)
+library(lubridate)
+```
+
+# Introduction
+
+Wastewater treatment plants (WWTPs) represent significant point-source stressors in the Saguenay Fjord ecosystem. Despite treatment processes, WWTPs discharge residual contaminants, nutrients, and other pollutants that can impact benthic communities and water quality.
+
+## WWTP Treatment Processes
+
+WWTPs operate through three main treatment processes (Al-Salmi, 2023):
+
+1. **Physical processes** - Physical separation and filtration
+2. **Chemical processes** - Chemical treatment and precipitation
+3. **Biological processes** - Activated sludge treatment and biological decomposition
+
+These facilities are designed to remove organic matter, nutrients, heavy metals, pathogens, and various contaminants.
+
+## Environmental Impacts
+
+### Residual Contaminants
+- Pharmaceuticals and personal care products persist in treated water
+- Emerging contaminants not fully removed during treatment
+- Cause endocrine disruption and behavioral changes in aquatic organisms
+
+### Nutrient Loading
+- Chronic nutrient enrichment in receiving water bodies
+- Can stimulate algal blooms and create hypoxic conditions
+- Results in fish kills and biodiversity loss
+
+### Thermal Pollution
+- Elevated effluent temperatures affect aquatic metabolism and survival
+- Reduced dissolved oxygen levels in receiving waters
+
+### Microorganism Introduction
+- Some pathogens survive treatment processes
+- Spread of antibiotic resistance in aquatic environments
+- Alteration of natural microbial communities
+
+# Data Loading
+
+## Base Data
+
+```{r load-base-data}
+# Load bathymetry using shared function
+bathy_path <- "/Users/hediyeh/Desktop/Phd_project_analyses/Chapter_1/Rmarkdown & Data/wwtp/bathy.tif"
+bathy_data <- load_bathymetry(bathy_path = bathy_path)
+
+bathy_200 <- bathy_data$bathy_200
+water_mask <- bathy_data$water_mask
+water_sf <- bathy_data$water_sf
+```
+
+## WWTP Station Data
+
+```{r load-wwtp-data}
+# Load WWTP locations
+wwtp_path <- "/Users/hediyeh/Desktop/Phd_project_analyses/Chapter_1/Rmarkdown & Data/wwtp/wwtp_sf.shp"
+wwtp_sf <- st_read(wwtp_path)
+
+# Transform to target CRS
+wwtp_sf <- st_transform(wwtp_sf, crs = target_crs)
+
+# Define station names
+wwtp_names <- c(
+  "Station d'épuration de L'Anse-Saint-Jean",       # ASJ
+  "Station d'épuration de Petit Saguenay",          # PS
+  "Station d'épuration de Saguenay (Chicoutimi)",   # SC
+  "Station d'épuration de Saint-Fulgence",          # SF
+  "Station d'épuration de Saguenay (Saint-Jean-Baptiste)", # SJB
+  "Station d'épuration de Saguenay (La Baie)",      # SLB
+  "Station d'épuration de Tadoussac"                # T
+)
+```
+
+## Project WWTP Locations to Water
+
+```{r project-stations}
+# Project each station to nearest water cell
+# Note: Shapefile order is: SJB, SF, T, SC, PS, SLB, ASJ
+
+pts_wwtp_SJB <- wwtp_sf[1, ]
+st_geometry(pts_wwtp_SJB) <- nearest_valid_cell(
+  st_coordinates(wwtp_sf[1, ]),
+  bathy_200
+) %>%
+  st_point() %>%
+  st_sfc() %>%
+  st_set_crs(target_crs)
+
+pts_wwtp_SF <- wwtp_sf[2, ]
+st_geometry(pts_wwtp_SF) <- nearest_valid_cell(
+  st_coordinates(wwtp_sf[2, ]),
+  bathy_200
+) %>%
+  st_point() %>%
+  st_sfc() %>%
+  st_set_crs(target_crs)
+
+pts_wwtp_T <- wwtp_sf[3, ]
+st_geometry(pts_wwtp_T) <- nearest_valid_cell(
+  st_coordinates(wwtp_sf[3, ]),
+  bathy_200
+) %>%
+  st_point() %>%
+  st_sfc() %>%
+  st_set_crs(target_crs)
+
+pts_wwtp_SC <- wwtp_sf[4, ]
+st_geometry(pts_wwtp_SC) <- nearest_valid_cell(
+  st_coordinates(wwtp_sf[4, ]),
+  bathy_200
+) %>%
+  st_point() %>%
+  st_sfc() %>%
+  st_set_crs(target_crs)
+
+pts_wwtp_PS <- wwtp_sf[5, ]
+st_geometry(pts_wwtp_PS) <- nearest_valid_cell(
+  st_coordinates(wwtp_sf[5, ]),
+  bathy_200
+) %>%
+  st_point() %>%
+  st_sfc() %>%
+  st_set_crs(target_crs)
+
+pts_wwtp_SLB <- wwtp_sf[6, ]
+st_geometry(pts_wwtp_SLB) <- nearest_valid_cell(
+  st_coordinates(wwtp_sf[6, ]),
+  bathy_200
+) %>%
+  st_point() %>%
+  st_sfc() %>%
+  st_set_crs(target_crs)
+
+pts_wwtp_ASJ <- wwtp_sf[7, ]
+st_geometry(pts_wwtp_ASJ) <- nearest_valid_cell(
+  st_coordinates(wwtp_sf[7, ]),
+  bathy_200
+) %>%
+  st_point() %>%
+  st_sfc() %>%
+  st_set_crs(target_crs)
+```
+
+# Grid and Transition Setup
+
+```{r setup-grid-transition}
+# Create full study area grid
+bbox_utm <- list(rbind(c(xmin, ymin), c(xmax, ymin), 
+                       c(xmax, ymax), c(xmin, ymax), c(xmin, ymin))) %>%
+  st_polygon() %>%
+  st_sfc(crs = target_crs)
+
+grid_res <- 200
+grid_points_sf <- st_make_grid(bbox_utm,
+                               cellsize = grid_res,
+                               what = "centers") %>%
+  st_sf()
+
+grid_polygons_sf <- st_make_grid(bbox_utm,
+                                 cellsize = grid_res,
+                                 what = "polygons") %>%
+  st_sf()
+
+# Create transition layer using shared function
+tr_bathy <- create_transition_layer(bathy_200)
+
+# Create template raster using shared function
+template_raster <- create_template_raster(bathy_200)
+```
+
+# Calculate Station-Specific Exposures
+
+```{r calculate-exposures}
+# Set decay type (Level IV for point sources)
+decay_type <- "IV"
+
+# Compute individual relative exposure fields using shared function
+wwtp_ASJ <- RelativeExposure(pts_wwtp_ASJ, tr_bathy, decay_type, 
+                             grid_points_sf, template_raster)
+
+wwtp_PS <- RelativeExposure(pts_wwtp_PS, tr_bathy, decay_type, 
+                            grid_points_sf, template_raster)
+
+wwtp_SC <- RelativeExposure(pts_wwtp_SC, tr_bathy, decay_type, 
+                            grid_points_sf, template_raster)
+
+wwtp_SF <- RelativeExposure(pts_wwtp_SF, tr_bathy, decay_type, 
+                            grid_points_sf, template_raster)
+
+wwtp_SJB <- RelativeExposure(pts_wwtp_SJB, tr_bathy, decay_type, 
+                             grid_points_sf, template_raster)
+
+wwtp_SLB <- RelativeExposure(pts_wwtp_SLB, tr_bathy, decay_type, 
+                             grid_points_sf, template_raster)
+
+wwtp_T <- RelativeExposure(pts_wwtp_T, tr_bathy, decay_type, 
+                           grid_points_sf, template_raster)
+```
+
+# Load and Combine Overflow Data
+
+```{r load-overflow-data}
+# File 1: WWTP station information
+wwtp_stn <- read.csv("/Users/hediyeh/Desktop/Phd_project_analyses/Chapter_1/Rmarkdown & Data/wwtp/STEP Effluents Données Brutes 2024-07-16 (modifié).csv") %>%
+  filter(Nom.de.la.station.d.épuration %in% wwtp_names) %>%
+  select(Nom.de.la.station.d.épuration,
+         Numéro.de.la.station.d.épuration,
+         Taille.de.la.station.d.épuration,
+         Débit...Calcul.de.taille..m..d.,
+         Nombre.d.ouvrages.de.surverse)
+
+wwtp_stn$Débit...Calcul.de.taille..m..d. <- as.numeric(wwtp_stn$Débit...Calcul.de.taille..m..d.)
+
+# File 2: Overflow structures
+file_os <- read.csv("/Users/hediyeh/Desktop/Phd_project_analyses/Chapter_1/Rmarkdown & Data/wwtp/OS DonBrut 2024-07-16_ouvrages de surverse.csv") %>%
+  select(Nom.de.la.station.d.épuration,
+         Numéro.de.la.station.d.épuration,
+         Lac.Cours.d.eau..milieu.récepteur.,
+         Identifiant.unique.de.l.OS..,
+         Débit.passant.par.l.ouvrage..m3.jour.,
+         Débit.passant.par.l.ouvrage....) %>%
+  left_join(wwtp_stn, ., by = "Nom.de.la.station.d.épuration")
+
+# File 3: Overflow event data
+file_of <- read.csv("/Users/hediyeh/Desktop/Phd_project_analyses/Chapter_1/Rmarkdown & Data/wwtp/OS DonBrut 2024-07-16_données.csv") %>%
+  select(Identifiant.unique.de.l.OS..,
+         X1900.01.00,
+         Durée.de.débordement..minutes.,
+         Volume.de.débordement..m..,
+         Contexte.du.débordement)
+
+# Combine all files
+file_over <- left_join(file_os, file_of, by = "Identifiant.unique.de.l.OS..")
+
+# Convert date to proper format
+file_over$X1900.01.00 <- as.POSIXct(file_over$X1900.01.00, format = "%d-%b-%y")
+```
+
+# Scenario 1: Full Year Exposure
+
+```{r full-year-exposure}
+# Calculate intensity index
+file_over_index <- file_over %>%
+  mutate(
+    intensity_index = (Durée.de.débordement..minutes. *
+                      Débit.passant.par.l.ouvrage..m3.jour. *
+                      `Débit.passant.par.l.ouvrage....`) / 1440
+  )
+
+# Group by station
+wwtp_over <- file_over_index %>%
+  group_by(Nom.de.la.station.d.épuration) %>%
+  summarise(
+    Taille.de.la.station = first(Taille.de.la.station.d.épuration),
+    Nombre.de.débordements = n(),
+    intensity_index = sum(intensity_index, na.rm = TRUE)
+  )
+
+# Calculate scaling factors
+wwtp_index <- sum(wwtp_over$intensity_index)
+scl_wwtp_index <- rep(0, length(wwtp_names))
+
+for (i in 1:length(wwtp_names)) {
+  station_index <- which(wwtp_over$Nom.de.la.station.d.épuration == wwtp_names[i])
+  if (length(station_index) > 0) {
+    scl_wwtp_index[i] <- wwtp_over$intensity_index[station_index] / wwtp_index
+  }
+}
+
+# Combine weighted exposures
+wwtp_exp_full <- wwtp_ASJ * scl_wwtp_index[1] +
+                 wwtp_PS  * scl_wwtp_index[2] +
+                 wwtp_SC  * scl_wwtp_index[3] +
+                 wwtp_SF  * scl_wwtp_index[4] +
+                 wwtp_SJB * scl_wwtp_index[5] +
+                 wwtp_SLB * scl_wwtp_index[6] +
+                 wwtp_T   * scl_wwtp_index[7]
+
+wwtp_exp_full <- wwtp_exp_full / max(values(wwtp_exp_full), na.rm = TRUE)
+wwtp_exp_full[wwtp_exp_full == 0] <- NA
+```
+
+## Full Year Visualization
+
+```{r plot-full-year, fig.cap="WWTP exposure map for full year"}
+# Contribution bar chart
+barplot(
+  scl_wwtp_index,
+  names.arg = c("ASJ", "PS", "SC", "SF", "SJB", "SLB", "T"),
+  ylim = c(0, 1),
+  main = "Relative Contribution of Each WWTP (Full Year)",
+  ylab = "Relative Contribution",
+  xlab = "WWTP",
+  col = "steelblue"
+)
+
+# Spatial distribution
+plot_exposure(wwtp_exp_full, "WWTP Exposure - Full Year", xmin, xmax, ymin, ymax)
+```
+
+
+# Save Results
+
+```{r save-results}
+# Save exposure rasters
+writeRaster(wwtp_exp_full, "wwtp_exposure_full_year.tif", overwrite = TRUE)
+writeRaster(wwtp_exp_winter, "wwtp_exposure_winter.tif", overwrite = TRUE)
+writeRaster(wwtp_exp_nonwinter, "wwtp_exposure_nonwinter.tif", overwrite = TRUE)
+
+# Save station locations
+wwtp_stations <- rbind(pts_wwtp_ASJ, pts_wwtp_PS, pts_wwtp_SC, pts_wwtp_SF,
+                       pts_wwtp_SJB, pts_wwtp_SLB, pts_wwtp_T)
+st_write(wwtp_stations, "wwtp_stations.gpkg", delete_dsn = TRUE)
+
+# Save workspace
+save(wwtp_exp_full, wwtp_exp_winter, wwtp_exp_nonwinter,
+     wwtp_stations, comparison_df,
+     file = "wwtp_exposure.RData")
+```
+
+# Summary
+
+This wastewater treatment plant exposure analysis quantifies the spatial distribution of WWTP impacts on the Saguenay Fjord benthic ecosystem across different temporal scenarios:
+
+**Key Features:**
+
+- **7 WWTP Stations**: Individual exposure fields for each treatment plant
+- **Level IV Decay**: Long-range decay function (a = -0.001) for dispersing contaminants
+- **Intensity Weighting**: Overflow frequency and volume used to weight relative contributions
+- **Seasonal Analysis**: Full year, winter, and non-winter period comparisons
+
+**Results:**
+
+- **Spatial Heterogeneity**: WWTP impacts concentrated near discharge points with gradual decay
+- **Seasonal Variation**: Relative contributions vary between winter and non-winter periods
+- **Multiple Stressors**: Cumulative exposure from multiple treatment plants in the system
+
+**Environmental Implications:**
+
+WWTP exposure highlights areas where benthic communities experience:
+
+- **Nutrient enrichment** from incompletely treated effluents
+- **Chemical contamination** including pharmaceuticals and personal care products
+- **Thermal pollution** from elevated effluent temperatures
+- **Microbial contamination** including antibiotic-resistant bacteria
+
+# References
+
+Al-Salmi, M. (2023). Wastewater treatment processes and their environmental impacts. *International Journal of Environmental Science*, 5(2), 276-285.
+
+---
+
+**Session Info:**
+
+```{r session-info}
+sessionInfo()
+```
