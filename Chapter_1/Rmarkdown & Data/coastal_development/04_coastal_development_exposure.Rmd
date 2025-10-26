@@ -1,0 +1,353 @@
+---
+title: "Coastal Development Exposure in the Saguenay Fjord"
+author: "Hediyeh Yazdanpanah"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    code_folding: show
+    highlight: pygments
+    theme: yeti
+    toc: TRUE
+    toc_depth: 4
+    toc_float:
+      collapsed: TRUE
+      smooth_scroll: TRUE
+    df_print: paged
+    fig_caption: TRUE
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  warning = TRUE,
+  message = TRUE,
+  error = TRUE,
+  fig.width = 10,
+  fig.height = 8
+)
+
+# SET WORKING DIRECTORY (note: coastal_development without special character)
+knitr::opts_knit$set(root.dir = "/Users/hediyeh/Desktop/Phd_project_analyses/Chapter_1/Rmarkdown & Data/coastal_development")
+
+# Source shared functions (this will load all required packages)
+source("/Users/hediyeh/Desktop/Phd_project_analyses/Chapter_1/00_shared_functions.R")
+
+# Load ONLY the extra packages needed for THIS specific analysis
+library(RColorBrewer)
+library(viridis)
+```
+
+# Introduction
+
+Coastal development represents a significant environmental stressor in the Saguenay Fjord through multiple pathways including light pollution, urban runoff, sedimentation, chemical contamination, and physical habitat alteration. This analysis quantifies coastal development exposure using nightlight satellite data as a proxy for human settlement density and infrastructure development.
+
+## Nightlight Data as Development Proxy
+
+Following established methodologies (Halpern et al., 2008), artificial nighttime illumination provides an objective, consistent measure of coastal urbanization intensity. Nightlight data effectively captures the spatial extent and intensity of human settlements, infrastructure, and economic activity in coastal zones.
+
+## Data Sources
+
+Nightlight raster data were obtained from the **Knowledge Network for Bioinformatics** repository, providing global coverage of artificial light emissions validated for marine impact assessments.
+
+## Methodology Overview
+
+1. **Coastal Buffer Definition**: 500m buffer from shoreline (0m bathymetric contour)
+2. **Light Source Identification**: 75th percentile threshold (top 25% of light intensity)
+3. **Binary Classification**: Sources above threshold set to value = 1 (equal weighting)
+4. **Point Source Conversion**: Raster aggregation and conversion to binary point sources
+5. **Source Optimization**: Random sampling to maximum 50 sources for computational efficiency
+6. **Spatial Decay Modeling**: Level III decay function for medium-range coastal effects
+
+# Data Loading
+
+## Base Data
+
+```{r load-base-data}
+# bathy.tif is in the coastal_development folder
+bathy_path <- "/Users/hediyeh/Desktop/Phd_project_analyses/Chapter_1/Rmarkdown & Data/coastal_development/bathy.tif"
+
+bathy_data <- load_bathymetry(bathy_path = bathy_path)
+bathy_200 <- bathy_data$bathy_200
+water_mask <- bathy_data$water_mask
+water_sf <- bathy_data$water_sf
+```
+
+## Nightlight Data
+
+```{r load-nightlight-data}
+# nightlights.tif is in the coastal_development folder
+nightlight_path <- "/Users/hediyeh/Desktop/Phd_project_analyses/Chapter_1/Rmarkdown & Data/coastal_development/nightlights.tif"
+
+light_raster <- raster::raster(nightlight_path)
+
+# Project to UTM and crop to study area
+if (raster::projection(light_raster) != target_crs) {
+  light_utm <- raster::projectRaster(light_raster, crs = target_crs)
+  light_crop <- raster::crop(light_utm, raster::extent(xmin, xmax, ymin, ymax))
+} else {
+  light_crop <- raster::crop(light_raster, raster::extent(xmin, xmax, ymin, ymax))
+}
+
+# Resample to 200m resolution
+light_200 <- raster::projectRaster(light_crop, crs = target_crs, res = c(200, 200))
+```
+
+# Coastal Zone and Light Source Identification
+
+## Shoreline Extraction and Buffering
+
+```{r define-coastal-zone}
+# Extract 0m contour as shoreline
+shoreline <- raster::rasterToContour(bathy_200, levels = 0)
+shoreline_sf <- st_as_sf(shoreline)
+
+# Create 500m coastal buffer
+coastal_buffer <- st_buffer(shoreline_sf, dist = 500)
+coastal_buffer_sp <- as(coastal_buffer, "Spatial")
+```
+
+## Light Source Identification
+
+Main light sources are identified using a **75th percentile threshold**, focusing on areas of significant development intensity (top 25% of light values within the coastal buffer). Sources are then converted to **binary classification** where all qualifying sources are weighted equally.
+
+```{r identify-light-sources}
+
+# Mask nightlight to coastal buffer
+light_coastal <- raster::mask(light_200, coastal_buffer_sp)
+
+# Calculate 75th percentile threshold
+light_threshold <- quantile(values(light_coastal), probs = 0.75, na.rm = TRUE)
+
+# Apply threshold and create BINARY classification
+light_sources <- light_coastal
+light_sources[light_sources < light_threshold] <- NA
+light_sources[light_sources >= light_threshold] <- 1  # Binary: all sources = 1
+
+# *** ADD THIS: Aggregate to reduce computational load (use max for binary) ***
+light_sources_agg <- raster::aggregate(light_sources, fact = 2, fun = max)
+
+# Convert to point sources (binary, no intensity values)
+# *** USE light_sources_agg instead of light_sources ***
+light_source_points <- raster::rasterToPoints(light_sources_agg,
+                                               fun = function(x) x == 1) %>%
+  as.data.frame() %>%
+  st_as_sf(coords = c("x", "y"), crs = target_crs)
+```
+
+## Source Optimization
+
+For computational efficiency, if the number of sources exceeds 50, a random sample is taken to maintain reasonable processing time while preserving spatial representation.
+
+```{r optimize-sources}
+# Limit sources for computational efficiency if needed
+if (nrow(light_source_points) > 50) {
+  light_source_points <- light_source_points[sample(nrow(light_source_points), 50), ]
+}
+```
+
+```{r sources-summary-table}
+# Display source summary
+cat("Binary light sources identified:", nrow(light_source_points), "\n")
+cat("Light threshold (75th percentile):", round(light_threshold, 2), "\n")
+```
+
+# Exposure Calculation
+
+## Setup Grid and Transition Layer
+
+```{r setup-exposure}
+# Create water-only grid (much faster than full study area grid)
+water_polygon_sf <- raster::rasterToPolygons(water_mask, dissolve = TRUE) %>%
+  st_as_sf()
+
+grid_res <- 200
+grid_water <- st_make_grid(water_polygon_sf,
+                           cellsize = grid_res,
+                           what = "centers") %>%
+  st_sf() %>%
+  st_intersection(water_polygon_sf)
+
+# Create water-only transition layer
+tr_water <- create_water_transition(bathy_200)
+
+# Create template raster
+template_raster <- create_template_raster(bathy_200)
+
+# Define simplified RelativeExposure for coastal (faster than shared function)
+RelativeExposure_coastal <- function(source, transition, decay_type, grid_points_sf, empty_raster) {
+  
+  # Limit to max 50 sources for performance
+  if (nrow(source) > 50) {
+    source <- source[sample(nrow(source), 50), ]
+  }
+  
+  source_sp <- as(source, "Spatial")
+  grid_points_sp <- as(grid_points_sf, "Spatial")
+  
+  distance <- costDistance(transition, grid_points_sp, source_sp)
+  min_dist <- apply(distance, 1, min)
+  
+  a_param <- switch(decay_type, "I" = -1, "II" = -0.1, "III" = -0.01, "IV" = -0.001)
+  
+  # Simplified exponential decay (faster than Gaussian)
+  exposure <- exp(a_param * min_dist)
+  
+  coords <- st_coordinates(grid_points_sf)
+  sp_exposure <- SpatialPointsDataFrame(
+    coords = coords,
+    data = data.frame(exposure = exposure),
+    proj4string = CRS(st_crs(empty_raster)$proj4string)
+  )
+  
+  exposure_rast <- rasterize(sp_exposure, empty_raster, 
+                            field = "exposure", fun = mean, background = NA)
+  
+  max_value <- cellStats(exposure_rast, stat = "max", na.rm = TRUE)
+  exposure_rast[] <- exposure_rast[] / max_value
+  exposure_rast <- mask(exposure_rast, water_mask)
+  
+  return(exposure_rast)
+}
+```
+
+
+## Calculate Coastal Development Exposure
+
+```{r calculate-coastal-exposure}
+# Set decay type for coastal development
+decay_type <- "III"
+
+# Calculate exposure using simplified coastal function (faster)
+coastal_exp <- RelativeExposure_coastal(
+  source = light_source_points,
+  transition = tr_water,
+  decay_type = decay_type,
+  grid_points_sf = grid_water,
+  empty_raster = template_raster
+)
+
+# Apply water mask and clean up
+coastal_exp <- mask(coastal_exp, water_mask < 0)
+```
+
+```{r exposure-stats}
+cat("\n=== COASTAL DEVELOPMENT EXPOSURE STATISTICS ===\n")
+cat("Total light sources processed:", nrow(light_source_points), "\n")
+cat("Mean exposure:", 
+    round(cellStats(coastal_exp, "mean", na.rm=TRUE), 6), "\n")
+cat("Non-NA cells:", sum(!is.na(values(coastal_exp))), "\n")
+```
+
+# Results Visualization
+
+## Coastal Development Exposure
+
+```{r plot-coastal-exposure, fig.cap="Coastal development exposure using binary nightlight classification with Level III decay"}
+plot_exposure(coastal_exp,
+              "Coastal Development Exposure - Binary Approach (Level III)",
+              xmin, xmax, ymin, ymax)
+```
+
+## Light Sources Overlay
+
+```{r plot-sources-overlay, fig.cap="Binary light source locations overlaid on coastal development exposure"}
+plot(coastal_exp,
+     main = "Binary Light Sources and Coastal Development Exposure",
+     xlab = "Easting (UTM Zone 19N)",
+     ylab = "Northing (UTM Zone 19N)",
+     xlim = c(xmin, xmax),
+     ylim = c(ymin, ymax),
+     axes = TRUE)
+
+# Add light source points (all equal size - binary)
+points(st_coordinates(light_source_points)[,1],
+       st_coordinates(light_source_points)[,2],
+       pch = 21,
+       cex = 1.5,
+       bg = "yellow",
+       col = "red",
+       lwd = 2)
+
+legend("topright",
+       legend = "Light Sources (Binary)",
+       pch = 21,
+       pt.cex = 1.5,
+       pt.bg = "yellow",
+       col = "red",
+       cex = 0.8,
+       bg = "white")
+```
+
+# Save Results
+
+```{r save-results}
+# Save exposure raster
+writeRaster(coastal_exp,
+            filename = "coastal_development_exposure.tif",
+            overwrite = TRUE)
+
+# Save source points
+st_write(light_source_points,
+         "coastal_light_sources.gpkg",
+         delete_dsn = TRUE)
+
+# Save workspace
+save(coastal_exp,
+     light_source_points,
+     coastal_buffer,
+     file = "coastal_development_exposure.RData")
+```
+
+# Summary
+
+This coastal development exposure analysis successfully developed a nightlight-based model to quantify terrestrial urbanization impacts on the Saguenay Fjord ecosystem:
+
+**Key Features:**
+- **Nightlight Proxy**: Artificial light intensity as objective measure of coastal development
+- **Coastal Buffer Approach**: 500m buffer from shoreline captures near-coastal development
+- **Threshold Selection**: 75th percentile identifies significant development areas
+- **Binary Classification**: All sources above threshold treated equally (value = 1)
+- **Computational Optimization**: Random sampling to maximum 50 sources for efficient processing
+- **Water-Focused Modeling**: Effects propagate through water but blocked by land
+- **Level III decay** function applied for medium-range coastal effects
+
+**Results:**
+- **`r nrow(light_source_points)`** coastal light sources identified and processed
+- **Binary approach**: All sources weighted equally regardless of intensity
+- **Spatial pattern**: Development concentrated in major settlement areas with gradual decay into fjord
+
+**Environmental Implications:**
+
+The spatial distribution of coastal development exposure highlights areas where marine ecosystems experience cumulative impacts from:
+
+- **Light pollution** affecting marine organism behavior, reproduction, and predator-prey dynamics
+- **Urban runoff** introducing nutrients, sediments, heavy metals, and organic contaminants
+- **Chemical contamination** from residential, commercial, and industrial sources
+- **Altered freshwater inputs** affecting salinity gradients and water quality
+- **Physical habitat alteration** through coastal infrastructure and shoreline modification
+
+**Methodological Advantages:**
+
+This nightlight-based approach provides:
+- Consistent spatial coverage across the study area
+- Objective quantification of development intensity
+- Temporal repeatability for monitoring changes
+- Computational efficiency through optimized source selection
+- Direct linkage between human activity patterns and potential marine impacts
+
+# References
+
+Halpern, B. S., Walbridge, S., Selkoe, K. A., Kappel, C. V., Micheli, F., D'Agrosa, C., ... & Watson, R. (2008). A global map of human impact on marine ecosystems. *Science*, 319(5865), 948-952.
+
+Knowledge Network for Bioinformatics. (2019). *Global nightlight raster data for marine impact assessment*. https://knb.ecoinformatics.org/view/doi:10.5063/F19Z92TW
+
+Davies, T. W., Duffy, J. P., Bennie, J., & Gaston, K. J. (2014). The nature, extent, and ecological implications of marine light pollution. *Frontiers in Ecology and the Environment*, 12(6), 347-355.
+
+Navara, K. J., & Nelson, R. J. (2007). The dark side of light at night: physiological, epidemiological, and ecological consequences. *Journal of Pineal Research*, 43(3), 215-224.
+
+---
+
+**Session Info:**
+```{r session-info}
+sessionInfo()
+```
