@@ -161,7 +161,7 @@ RelativeExposure <- function(source, transition, decay_type, grid_points_sf,
                     stop("Invalid decay type"))
   
   # Gaussian kernel with scaling factor
-  exposure <- exp((0.000025 * a_param) * (min_dist)^2)
+  exposure <- exp((0.00025 * a_param) * (min_dist)^2)
   
   coords <- st_coordinates(grid_points_sf)
   sp_exposure <- SpatialPointsDataFrame(
