@@ -32,7 +32,8 @@ knitr::opts_chunk$set(
 knitr::opts_knit$set(root.dir = "/Users/hediyeh/Desktop/Phd_project_analyses/Chapter_1/Rmarkdown & Data/wwtp")
 
 # Source shared functions
-source("/Users/hediyeh/Desktop/Phd_project_analyses/Chapter_1/00_shared_functions.R")
+#source("/Users/hediyeh/Desktop/Phd_project_analyses/Chapter_1/00_shared_functions.R")
+source("/Users/hediyeh/Desktop/Phd_project_analyses/Chapter_1/00_shared_functions_0.00025.R")
 
 # Load additional packages
 library(viridis)

@@ -30,7 +30,8 @@ knitr::opts_chunk$set(
 knitr::opts_knit$set(root.dir = "/Users/hediyeh/Desktop/Phd_project_analyses/Chapter_1/Rmarkdown & Data/shipping")
 
 # Source shared functions (this will load all required packages)
-source("/Users/hediyeh/Desktop/Phd_project_analyses/Chapter_1/00_shared_functions.R")
+#source("/Users/hediyeh/Desktop/Phd_project_analyses/Chapter_1/00_shared_functions.R")
+source("/Users/hediyeh/Desktop/Phd_project_analyses/Chapter_1/00_shared_functions_0.00025.R")
 
 # Load ONLY the extra packages needed for THIS specific analysis
 library(RColorBrewer)
