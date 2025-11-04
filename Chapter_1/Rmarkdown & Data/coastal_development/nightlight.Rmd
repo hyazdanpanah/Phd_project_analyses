@@ -265,7 +265,7 @@ RelativeExposure <- function(source, transition, decay_type, grid_points_sf, emp
                     stop("Invalid decay type"))
   
   # Compute exposure values
-  exposure <- exp(a_param * min_dist)
+  exposure <- exp((0.00025 * a_param) * (min_dist)^2)
   
   # Create exposure raster
   cat("Creating final raster...\n")
@@ -318,7 +318,7 @@ writeRaster(light_exposure, "coastal_light_exposure_III_binary.tif", overwrite =
 ```
 ```{r plot1 }
 
-png("lightIII.png")
+#png("lightIII.png")
 # Create plot with binary approach
 plot(light_exposure, 
      main = "Coastal Light Exposure (Type III)")
@@ -329,7 +329,7 @@ scalebar(d = 10000,  # distance in meters (adjust based on your map size)
          divs = 2,
          below = "km",
          label = c(0, 5, 10))
-dev.off()    
+#dev.off()    
 ```
 
 

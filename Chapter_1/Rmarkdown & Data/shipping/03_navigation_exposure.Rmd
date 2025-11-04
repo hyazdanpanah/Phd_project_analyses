@@ -32,7 +32,7 @@ knitr::opts_knit$set(root.dir = ".")
 # Source shared functions
 # Source shared functions (this will load all required packages)
 #source("/Users/hediyeh/Desktop/Phd_project_analyses/Chapter_1/00_shared_functions.R")
-source("../../00_shared_functions_0.00025.R")
+source("/Users/hediyeh/Desktop/Phd_project_analyses/Chapter_1/00_shered_functions_0.00005.R")
 
 # Load extra packages
 library(RColorBrewer)

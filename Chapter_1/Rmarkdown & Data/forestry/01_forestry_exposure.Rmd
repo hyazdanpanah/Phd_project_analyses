@@ -35,7 +35,8 @@ library(RColorBrewer)
 
 # Source shared functions
 #source("00_shared_functions.R")
-source("/Users/hediyeh/Desktop/Phd_project_analyses/Chapter_1/00_shared_functions_0.00025.R")
+#source("/Users/hediyeh/Desktop/Phd_project_analyses/Chapter_1/00_shared_functions_0.00025.R")
+source("/Users/hediyeh/Desktop/Phd_project_analyses/Chapter_1/00_shered_functions_0.00005.R")
 ```
 
 # Introduction
@@ -56,13 +57,16 @@ This analysis quantifies the potential environmental impact of forestry activiti
 ## Base Data
 
 ```{r load-base-data}
-# Load watersheds, bathymetry, and water mask using shared function
-base_data <- load_base_data()
+# Load watersheds, bathymetry, and water mask
+bathy_data <- load_bathymetry(bathy_path = "bathy.tif")
+bathy_200 <- bathy_data$bathy_200
+water_mask <- bathy_data$water_mask
+water_sf <- bathy_data$water_sf
 
-watersheds <- base_data$watersheds
-bathy_200 <- base_data$bathy_200
-water_mask <- base_data$water_mask
-water_sf <- base_data$water_sf
+# Load watersheds
+watersheds <- load_watersheds(
+  watershed_path = "/Users/hediyeh/Desktop/Phd_project_analyses/Chapter_1/Rmarkdown & Data/forestry/corrected_watersheds.gpkg"
+)
 ```
 
 ## Forestry Data
@@ -368,16 +372,31 @@ for(i in 1:nrow(river_mouth_sources_active)) {
   river_exposures[[i]] <- single_exposure * intensity
 }
 
-# Combine all weighted exposures
-forestry_exp <- Reduce('+', river_exposures)
+valid_exposures <- river_exposures[!sapply(river_exposures, is.null)]
+combined_exposure <- Reduce('+', valid_exposures)
 
-# Normalize to 0-1 scale
-max_value <- cellStats(forestry_exp, stat = "max", na.rm = TRUE)
-forestry_exp <- forestry_exp / max_value
+# Normalize to 0-1
+max_val <- cellStats(combined_exposure, stat = "max", na.rm = TRUE)
+# Start fresh from normalized exposure
+combined_exposure <- Reduce('+', valid_exposures)
+max_val <- cellStats(combined_exposure, stat = "max", na.rm = TRUE)
+combined_exposure <- combined_exposure / max_val
 
-# Apply water mask
-forestry_exp <- mask(forestry_exp, water_mask < 0)
-forestry_exp[forestry_exp == 0] <- NA
+# Create fjord mask: TRUE for water (has values), FALSE for land (is NA)
+fjord_mask <- !is.na(bathy_200)  # This gives TRUE/FALSE, not TRUE/NA
+
+# Verify the mask now has both TRUE and FALSE
+table(values(fjord_mask), useNA = "always")  # Should show TRUE, FALSE, and maybe NA
+
+# Now apply the logic:
+# 1. In water areas (fjord_mask = TRUE), change 0 to small value for gray
+combined_exposure[fjord_mask & combined_exposure == 0] <- 0.0001
+
+# 2. In land areas (fjord_mask = FALSE), set to NA for white
+combined_exposure[!fjord_mask] <- NA
+
+# Save
+forestry_exp <- combined_exposure
 ```
 
 ```{r exposure-stats}
@@ -391,9 +410,11 @@ cat("Non-NA cells:", sum(!is.na(values(forestry_exp))), "\n")
 # Results Visualization
 
 ```{r plot-forestry-exposure, fig.cap="Forestry exposure in Saguenay Fjord using Level III decay"}
+#png("forestry_0.00005.png")
 plot_exposure(forestry_exp, 
               "Forestry Exposure - Watershed-based (Level III)",
               xmin, xmax, ymin, ymax)
+#dev.off()
 ```
 
 # Save Results

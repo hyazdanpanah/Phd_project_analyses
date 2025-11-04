@@ -33,7 +33,7 @@ knitr::opts_knit$set(root.dir = "/Users/hediyeh/Desktop/Phd_project_analyses/Cha
 
 # Source shared functions
 #source("/Users/hediyeh/Desktop/Phd_project_analyses/Chapter_1/00_shared_functions.R")
-source("/Users/hediyeh/Desktop/Phd_project_analyses/Chapter_1/00_shared_functions_0.00025.R")
+source("/Users/hediyeh/Desktop/Phd_project_analyses/Chapter_1/00_shered_functions_0.00005.R")
 
 # Load additional packages
 library(viridis)
@@ -336,7 +336,9 @@ barplot(
 )
 
 # Spatial distribution
-plot_exposure(wwtp_exp_full, "WWTP Exposure - Full Year", xmin, xmax, ymin, ymax)
+#png("wwtp_0.00005.png")
+plot_exposure(wwtp_exp_full, "WWTP Exposure level IV", xmin, xmax, ymin, ymax)
+#dev.off()
 ```
 
 

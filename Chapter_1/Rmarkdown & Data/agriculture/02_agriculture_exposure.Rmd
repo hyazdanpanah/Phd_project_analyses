@@ -40,7 +40,8 @@ library(here)
 
 # Source shared functions
 #source("/Users/hediyeh/Desktop/Phd_project_analyses/Chapter_1/00_shared_functions.R")
-source("/Users/hediyeh/Desktop/Phd_project_analyses/Chapter_1/00_shared_functions_0.00025.R")
+#source("/Users/hediyeh/Desktop/Phd_project_analyses/Chapter_1/00_shared_functions_0.00025.R")
+source("/Users/hediyeh/Desktop/Phd_project_analyses/Chapter_1/00_shered_functions_0.00005.R")
 ```
 
 # Introduction
@@ -326,15 +327,42 @@ for(i in 1:nrow(river_mouth_sources_active)) {
 }
 
 # Combine all weighted exposures
-agri_exp <- Reduce('+', river_exposures)
+#agri_exp <- Reduce('+', river_exposures)
 
 # Normalize to 0-1 scale
-max_value <- cellStats(agri_exp, stat = "max", na.rm = TRUE)
-agri_exp <- agri_exp / max_value
+#max_value <- cellStats(agri_exp, stat = "max", na.rm = TRUE)
+#agri_exp <- agri_exp / max_value
 
 # Apply water mask
-agri_exp <- mask(agri_exp, water_mask < 0)
-agri_exp[agri_exp == 0] <- NA
+#agri_exp <- mask(agri_exp, water_mask < 0)
+#agri_exp[agri_exp == 0] <- NA
+# Combine all weighted exposures
+
+valid_exposures <- river_exposures[!sapply(river_exposures, is.null)]
+combined_exposure <- Reduce('+', valid_exposures)
+
+# Normalize to 0-1
+max_val <- cellStats(combined_exposure, stat = "max", na.rm = TRUE)
+# Start fresh from normalized exposure
+combined_exposure <- Reduce('+', valid_exposures)
+max_val <- cellStats(combined_exposure, stat = "max", na.rm = TRUE)
+combined_exposure <- combined_exposure / max_val
+
+# Create fjord mask: TRUE for water (has values), FALSE for land (is NA)
+fjord_mask <- !is.na(bathy_200)  # This gives TRUE/FALSE, not TRUE/NA
+
+# Verify the mask now has both TRUE and FALSE
+table(values(fjord_mask), useNA = "always")  # Should show TRUE, FALSE, and maybe NA
+
+# Now apply the logic:
+# 1. In water areas (fjord_mask = TRUE), change 0 to small value for gray
+combined_exposure[fjord_mask & combined_exposure == 0] <- 0.0001
+
+# 2. In land areas (fjord_mask = FALSE), set to NA for white
+combined_exposure[!fjord_mask] <- NA
+
+# Save
+agri_exp <- combined_exposure
 ```
 
 ```{r exposure-stats}
@@ -348,9 +376,11 @@ cat("Non-NA cells:", sum(!is.na(values(agri_exp))), "\n")
 # Results Visualization
 
 ```{r plot-agriculture-exposure, fig.cap="Agricultural exposure in Saguenay Fjord using Level III decay"}
+#png("agricultire_0.00005")
 plot_exposure(agri_exp, 
               "Agricultural Exposure - Watershed-based (Level III)",
               xmin, xmax, ymin, ymax)
+#dev.off()
 ```
 
 # Save Results
