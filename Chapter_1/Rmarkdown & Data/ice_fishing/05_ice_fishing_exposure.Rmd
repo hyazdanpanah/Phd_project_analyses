@@ -223,7 +223,7 @@ ice_fishing_exp_II <- ice_fishing_exp / max(values(ice_fishing_exp), na.rm = TRU
 ## Ice Fishing Exposure Map
 
 ```{r plot-exposure, fig.cap="Ice fishing exposure weighted by cabin density with Level II decay"}
-#png("ice_fidhing_0.00005")
+#png("ice_fidhing_0.00005.png")
 plot_exposure(ice_fishing_exp_II,
               "Ice Fishing Exposure - Cabin-Weighted (Level II)",
               xmin, xmax, ymin, ymax)

@@ -376,7 +376,7 @@ cat("Non-NA cells:", sum(!is.na(values(agri_exp))), "\n")
 # Results Visualization
 
 ```{r plot-agriculture-exposure, fig.cap="Agricultural exposure in Saguenay Fjord using Level III decay"}
-#png("agricultire_0.00005")
+#png("agricultire_0.00005.png")
 plot_exposure(agri_exp, 
               "Agricultural Exposure - Watershed-based (Level III)",
               xmin, xmax, ymin, ymax)
