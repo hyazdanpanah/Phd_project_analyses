@@ -175,45 +175,6 @@ tr_water <- create_water_transition(bathy_200)
 # Create template raster
 template_raster <- create_template_raster(bathy_200)
 
-# Define simplified RelativeExposure for coastal (faster than shared function)
-RelativeExposure_coastal <- function(source, transition, decay_type, grid_points_sf, empty_raster) {
-  
-  # Limit to max 50 sources for performance
-  if (nrow(source) > 50) {
-    source <- source[sample(nrow(source), 50), ]
-  }
-  
-  source_sp <- as(source, "Spatial")
-  grid_points_sp <- as(grid_points_sf, "Spatial")
-  
-  distance <- costDistance(transition, grid_points_sp, source_sp)
-  min_dist <- apply(distance, 1, min)
-  
-  a_param <- switch(decay_type, 
-                    "I" = -1, 
-                    "II" = -0.1, 
-                    "III" = -0.01, 
-                    "IV" = -0.001)
-  
-  # exponential decay 
-  exposure <- exp((0.00005 * a_param) * (min_dist)^2)
-  
-  coords <- st_coordinates(grid_points_sf)
-  sp_exposure <- SpatialPointsDataFrame(
-    coords = coords,
-    data = data.frame(exposure = exposure),
-    proj4string = CRS(st_crs(empty_raster)$proj4string)
-  )
-  
-  exposure_rast <- rasterize(sp_exposure, empty_raster, 
-                            field = "exposure", fun = mean, background = NA)
-  
-  max_value <- cellStats(exposure_rast, stat = "max", na.rm = TRUE)
-  exposure_rast[] <- exposure_rast[] / max_value
-  exposure_rast <- mask(exposure_rast, water_mask)
-  
-  return(exposure_rast)
-}
 ```
 
 
