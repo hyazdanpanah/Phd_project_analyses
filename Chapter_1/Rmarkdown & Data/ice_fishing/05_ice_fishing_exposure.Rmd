@@ -32,7 +32,7 @@ knitr::opts_knit$set(root.dir = "/Users/hediyeh/Desktop/Phd_project_analyses/Cha
 # Source shared functions (this will load all required packages)
 #source("/Users/hediyeh/Desktop/Phd_project_analyses/Chapter_1/00_shared_functions.R")
 #source("/Users/hediyeh/Desktop/Phd_project_analyses/Chapter_1/00_shared_functions_0.00025.R")
-source("/Users/hediyeh/Desktop/Phd_project_analyses/Chapter_1/00_shered_functions_0.00005.R")
+source("/Users/hediyeh/Desktop/Phd_project_analyses/Chapter_1/00_shered_functions_0.00001.R")
 
 # Load ONLY the extra packages needed for THIS specific analysis
 library(RColorBrewer)
@@ -223,7 +223,7 @@ ice_fishing_exp_II <- ice_fishing_exp / max(values(ice_fishing_exp), na.rm = TRU
 ## Ice Fishing Exposure Map
 
 ```{r plot-exposure, fig.cap="Ice fishing exposure weighted by cabin density with Level II decay"}
-#png("ice_fidhing_0.00005.png")
+#png("ice_fidhing_0.00001.png")
 plot_exposure(ice_fishing_exp_II,
               "Ice Fishing Exposure - Cabin-Weighted (Level II)",
               xmin, xmax, ymin, ymax)

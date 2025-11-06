@@ -36,7 +36,7 @@ library(RColorBrewer)
 # Source shared functions
 #source("00_shared_functions.R")
 #source("/Users/hediyeh/Desktop/Phd_project_analyses/Chapter_1/00_shared_functions_0.00025.R")
-source("/Users/hediyeh/Desktop/Phd_project_analyses/Chapter_1/00_shered_functions_0.00005.R")
+source("/Users/hediyeh/Desktop/Phd_project_analyses/Chapter_1/00_shered_functions_0.00001.R")
 ```
 
 # Introduction
@@ -410,7 +410,7 @@ cat("Non-NA cells:", sum(!is.na(values(forestry_exp))), "\n")
 # Results Visualization
 
 ```{r plot-forestry-exposure, fig.cap="Forestry exposure in Saguenay Fjord using Level III decay"}
-#png("forestry_0.00005.png")
+#png("forestry_0.00001.png")
 plot_exposure(forestry_exp, 
               "Forestry Exposure - Watershed-based (Level III)",
               xmin, xmax, ymin, ymax)

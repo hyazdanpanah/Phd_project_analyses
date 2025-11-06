@@ -243,8 +243,8 @@ wwtp_T <- RelativeExposure(pts_wwtp_T, tr_bathy, decay_type,
 ```{r load-overflow-data}
 # File 1: WWTP station information
 wwtp_stn <- read.csv("/Users/hediyeh/Desktop/Phd_project_analyses/Chapter_1/Rmarkdown & Data/wwtp/STEP Effluents Données Brutes 2024-07-16 (modifié).csv") %>%
-  filter(Nom.de.la.station.d.épuration %in% wwtp_names) %>%
-  select(Nom.de.la.station.d.épuration,
+  dplyr::filter(Nom.de.la.station.d.épuration %in% wwtp_names) %>%
+  dplyr::select(Nom.de.la.station.d.épuration,
          Numéro.de.la.station.d.épuration,
          Taille.de.la.station.d.épuration,
          Débit...Calcul.de.taille..m..d.,
@@ -254,7 +254,7 @@ wwtp_stn$Débit...Calcul.de.taille..m..d. <- as.numeric(wwtp_stn$Débit...Calcul
 
 # File 2: Overflow structures
 file_os <- read.csv("/Users/hediyeh/Desktop/Phd_project_analyses/Chapter_1/Rmarkdown & Data/wwtp/OS DonBrut 2024-07-16_ouvrages de surverse.csv") %>%
-  select(Nom.de.la.station.d.épuration,
+  dplyr::select(Nom.de.la.station.d.épuration,
          Numéro.de.la.station.d.épuration,
          Lac.Cours.d.eau..milieu.récepteur.,
          Identifiant.unique.de.l.OS..,
@@ -264,7 +264,7 @@ file_os <- read.csv("/Users/hediyeh/Desktop/Phd_project_analyses/Chapter_1/Rmark
 
 # File 3: Overflow event data
 file_of <- read.csv("/Users/hediyeh/Desktop/Phd_project_analyses/Chapter_1/Rmarkdown & Data/wwtp/OS DonBrut 2024-07-16_données.csv") %>%
-  select(Identifiant.unique.de.l.OS..,
+  dplyr::select(Identifiant.unique.de.l.OS..,
          X1900.01.00,
          Durée.de.débordement..minutes.,
          Volume.de.débordement..m..,
@@ -336,7 +336,7 @@ barplot(
 )
 
 # Spatial distribution
-#png("wwtp_0.00005.png")
+#png("wwtp_0.00001.png")
 plot_exposure(wwtp_exp_full, "WWTP Exposure level IV", xmin, xmax, ymin, ymax)
 #dev.off()
 ```

@@ -31,8 +31,8 @@ knitr::opts_knit$set(root.dir = "/Users/hediyeh/Desktop/Phd_project_analyses/Cha
 
 # Load required packages
 library(sf)
-library(dplyr)
 library(raster)
+library(dplyr)
 library(gdistance)
 library(RColorBrewer)
 library(readxl)
@@ -41,7 +41,7 @@ library(here)
 # Source shared functions
 #source("/Users/hediyeh/Desktop/Phd_project_analyses/Chapter_1/00_shared_functions.R")
 #source("/Users/hediyeh/Desktop/Phd_project_analyses/Chapter_1/00_shared_functions_0.00025.R")
-source("/Users/hediyeh/Desktop/Phd_project_analyses/Chapter_1/00_shered_functions_0.00005.R")
+source("/Users/hediyeh/Desktop/Phd_project_analyses/Chapter_1/00_shered_functions_0.00001.R")
 ```
 
 # Introduction
@@ -109,21 +109,21 @@ munic_selection <- c(
 
 # Prepare municipality data
 munic_sf <- agriculture_munic %>%
-  filter(MUS_NM_MUN %in% munic_selection) %>%
-  select(municipalite = MUS_NM_MUN, geometry) %>%
+  dplyr::filter(MUS_NM_MUN %in% munic_selection) %>%
+  dplyr::select(municipalite = MUS_NM_MUN, geometry) %>%
   st_transform(crs = target_crs)
 
 # Load cultivated area data
 agri_data <- read_excel("SF_agri_all.xlsx")
 
 # Merge spatial and attribute data
-data_agri_sf <- left_join(munic_sf, agri_data, by = "municipalite") %>%
+data_agri_sf <- dplyr::left_join(munic_sf, agri_data, by = "municipalite") %>%
   st_transform(crs = target_crs)
 
 # Clean duplicate municipalities by combining geometries
 data_agri_sf <- data_agri_sf %>%
-  group_by(municipalite) %>%
-  summarise(
+  dplyr::group_by(municipalite) %>%
+  dplyr::summarise(
     cultivated_area_ha = sum(`Estimated cultivated area in the zone`, na.rm = TRUE),
     .groups = 'drop'
   ) %>%
@@ -376,7 +376,7 @@ cat("Non-NA cells:", sum(!is.na(values(agri_exp))), "\n")
 # Results Visualization
 
 ```{r plot-agriculture-exposure, fig.cap="Agricultural exposure in Saguenay Fjord using Level III decay"}
-#png("agricultire_0.00005.png")
+#png("agricultire_0.00001.png")
 plot_exposure(agri_exp, 
               "Agricultural Exposure - Watershed-based (Level III)",
               xmin, xmax, ymin, ymax)
