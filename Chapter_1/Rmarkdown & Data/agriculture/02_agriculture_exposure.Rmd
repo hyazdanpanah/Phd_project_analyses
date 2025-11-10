@@ -336,8 +336,8 @@ for(i in 1:nrow(river_mouth_sources_active)) {
 # Apply water mask
 #agri_exp <- mask(agri_exp, water_mask < 0)
 #agri_exp[agri_exp == 0] <- NA
-# Combine all weighted exposures
 
+# Combine all weighted exposures
 valid_exposures <- river_exposures[!sapply(river_exposures, is.null)]
 combined_exposure <- Reduce('+', valid_exposures)
 

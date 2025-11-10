@@ -110,9 +110,12 @@ coastal_buffer_sp <- as(coastal_buffer, "Spatial")
 
 ## Light Source Identification
 
-Main light sources are identified using a **75th percentile threshold**, focusing on areas of significant development intensity (top 25% of light values within the coastal buffer). Sources are then converted to **binary classification** where all qualifying sources are weighted equally.
+Main light sources are identified using a **75th percentile threshold**, focusing on areas of significant development intensity (top 25% of light values within the coastal buffer). Sources are then **clustered spatially** and weighted by their actual light intensity values.
 
 ```{r identify-light-sources}
+# ===============================================================================
+# EXTRACT INTENSITY VALUES (NOT BINARY)
+# ===============================================================================
 
 # Mask nightlight to coastal buffer
 light_coastal <- raster::mask(light_200, coastal_buffer_sp)
@@ -120,40 +123,72 @@ light_coastal <- raster::mask(light_200, coastal_buffer_sp)
 # Calculate 75th percentile threshold
 light_threshold <- quantile(values(light_coastal), probs = 0.75, na.rm = TRUE)
 
-# Apply threshold and create BINARY classification
-light_sources <- light_coastal
-light_sources[light_sources < light_threshold] <- NA
-light_sources[light_sources >= light_threshold] <- 1  # Binary: all sources = 1
+# Keep only values above threshold (KEEP INTENSITY, don't convert to binary)
+light_sources_intensity <- light_coastal
+light_sources_intensity[light_sources_intensity < light_threshold] <- NA
 
-# *** ADD THIS: Aggregate to reduce computational load (use max for binary) ***
-light_sources_agg <- raster::aggregate(light_sources, fact = 2, fun = max)
+# Aggregate to reduce points
+light_sources_agg <- raster::aggregate(light_sources_intensity, fact = 2, fun = mean)
 
-# Convert to point sources (binary, no intensity values)
-# *** USE light_sources_agg instead of light_sources ***
-light_source_points <- raster::rasterToPoints(light_sources_agg,
-                                               fun = function(x) x == 1) %>%
-  as.data.frame() %>%
+# Convert to points WITH intensity values
+light_source_df <- raster::rasterToPoints(light_sources_agg, spatial = FALSE) %>%
+  as.data.frame()
+
+colnames(light_source_df) <- c("x", "y", "light_intensity")
+
+# Convert to sf with intensity
+light_source_points <- light_source_df %>%
   st_as_sf(coords = c("x", "y"), crs = target_crs)
+
+# Calculate intensity index (0-1 scale)
+max_light <- max(light_source_points$light_intensity, na.rm = TRUE)
+light_source_points$intensity_index <- light_source_points$light_intensity / max_light
+
+cat("Initial light sources above threshold:", nrow(light_source_points), "\n")
+cat("Intensity range:", 
+    round(min(light_source_points$intensity_index), 3), "-",
+    round(max(light_source_points$intensity_index), 3), "\n")
+
+# ===============================================================================
+# SPATIAL CLUSTERING - KEEP HIGHEST INTENSITY POINT PER CLUSTER
+# ===============================================================================
+
+library(dbscan)
+
+# Cluster nearby light sources (500m radius)
+coords_matrix <- st_coordinates(light_source_points)
+clusters <- dbscan(coords_matrix, eps = 500, minPts = 1)
+
+cat("Created", max(clusters$cluster), "spatial clusters\n")
+
+# Keep brightest point per cluster and sum intensities
+light_source_clustered <- light_source_points %>%
+  mutate(cluster = clusters$cluster) %>%
+  group_by(cluster) %>%
+  arrange(desc(intensity_index)) %>%
+  mutate(
+    total_cluster_intensity = sum(intensity_index),
+    n_sources = n()
+  ) %>%
+  slice(1) %>%  # Keep brightest point (stays on actual settlement)
+  ungroup() %>%
+  mutate(intensity_index = total_cluster_intensity)
+
+# Renormalize
+max_intensity <- max(light_source_clustered$intensity_index)
+light_source_clustered$intensity_index <- light_source_clustered$intensity_index / max_intensity
+
+# Use clustered points
+light_source_points <- light_source_clustered
+
+cat("\n=== CLUSTERING SUMMARY ===\n")
+cat("Final clusters:", nrow(light_source_points), "\n")
+cat("Average sources per cluster:", round(mean(light_source_points$n_sources), 1), "\n")
+cat("Total original sources:", sum(light_source_points$n_sources), "\n")
+cat("Intensity range:", 
+    round(min(light_source_points$intensity_index), 3), "-",
+    round(max(light_source_points$intensity_index), 3), "\n")
 ```
-
-## Source Optimization
-
-For computational efficiency, if the number of sources exceeds 50, a random sample is taken to maintain reasonable processing time while preserving spatial representation.
-
-```{r optimize-sources}
-# Limit sources for computational efficiency if needed
-if (nrow(light_source_points) > 50) {
-  light_source_points <- light_source_points[sample(nrow(light_source_points), 50), ]
-}
-```
-
-```{r sources-summary-table}
-# Display source summary
-cat("Binary light sources identified:", nrow(light_source_points), "\n")
-cat("Light threshold (75th percentile):", round(light_threshold, 2), "\n")
-```
-
-# Exposure Calculation
 
 ## Setup Grid and Transition Layer
 
@@ -177,33 +212,67 @@ template_raster <- create_template_raster(bathy_200)
 
 ```
 
-
-## Calculate Coastal Development Exposure
-
-```{r calculate-coastal-exposure}
-# Set decay type for coastal development
+## Calculate Intensity-Weighted Coastal Development Exposure
+```{r calculate-intensity-weighted-exposure}
+# Set decay type
 decay_type <- "III"
 
-# Calculate exposure using simplified coastal function (faster)
-coastal_exp <- RelativeExposure_coastal(
-  source = light_source_points,
-  transition = tr_water,
-  decay_type = decay_type,
-  grid_points_sf = grid_water,
-  empty_raster = template_raster
-)
+# Calculate individual exposures
+light_exposures <- list()
 
-# Apply water mask and clean up
-coastal_exp <- mask(coastal_exp, water_mask < 0)
+for (i in 1:nrow(light_source_points)) {
+  cat("Processing cluster", i, "of", nrow(light_source_points), 
+      "- Intensity:", round(light_source_points$intensity_index[i], 3),
+      "- Sources:", light_source_points$n_sources[i], "\n")
+  
+  intensity <- light_source_points$intensity_index[i]
+  
+  # Calculate exposure for this cluster
+  single_exp <- RelativeExposure(
+    source = light_source_points[i,],
+    transition = tr_water,
+    decay_type = decay_type,
+    grid_points_sf = grid_water,
+    empty_raster = template_raster
+  )
+  
+  # Weight by intensity
+  light_exposures[[i]] <- single_exp * intensity
+}
+
+# ===============================================================================
+# COMBINE AND NORMALIZE WITH PROPER MASKING
+# ===============================================================================
+
+# Filter out any NULL exposures 
+valid_exposures <- light_exposures[!sapply(light_exposures, is.null)]
+
+# Combine all weighted exposures
+combined_exposure <- Reduce('+', valid_exposures)
+
+# Normalize to 0-1 scale
+max_val <- cellStats(combined_exposure, stat = "max", na.rm = TRUE)
+combined_exposure <- combined_exposure / max_val
+
+# Create fjord mask: TRUE for any area with bathymetry data (water OR land)
+fjord_mask <- !is.na(bathy_200)
+
+# Verify the mask
+cat("Fjord mask check:\n")
+print(table(values(fjord_mask), useNA = "always"))
+
+# Apply intelligent masking:
+# 1. In water areas with 0 exposure: set to small value (shows as light gray)
+combined_exposure[fjord_mask & combined_exposure == 0] <- 0.0001
+
+# 2. In land areas: set to NA (shows as white)
+combined_exposure[!fjord_mask] <- NA
+
+# Final exposure
+coastal_exp <- combined_exposure
+
 ```
 
-```{r exposure-stats}
-cat("\n=== COASTAL DEVELOPMENT EXPOSURE STATISTICS ===\n")
-cat("Total light sources processed:", nrow(light_source_points), "\n")
-cat("Mean exposure:", 
-    round(cellStats(coastal_exp, "mean", na.rm=TRUE), 6), "\n")
-cat("Non-NA cells:", sum(!is.na(values(coastal_exp))), "\n")
-```
 
 # Results Visualization
 
@@ -212,40 +281,11 @@ cat("Non-NA cells:", sum(!is.na(values(coastal_exp))), "\n")
 ```{r plot-coastal-exposure, fig.cap="Coastal development exposure using binary nightlight classification with Level III decay"}
 #png("coastal_development_0.00001.png")
 plot_exposure(coastal_exp,
-              "Coastal Development Exposure - Binary Approach (Level III)",
+              "Coastal Development Exposure -  inensity approach (Level III)",
               xmin, xmax, ymin, ymax)
 #dev.off()
 ```
 
-## Light Sources Overlay
-
-```{r plot-sources-overlay, fig.cap="Binary light source locations overlaid on coastal development exposure"}
-plot(coastal_exp,
-     main = "Binary Light Sources and Coastal Development Exposure",
-     xlab = "Easting (UTM Zone 19N)",
-     ylab = "Northing (UTM Zone 19N)",
-     xlim = c(xmin, xmax),
-     ylim = c(ymin, ymax),
-     axes = TRUE)
-
-# Add light source points (all equal size - binary)
-points(st_coordinates(light_source_points)[,1],
-       st_coordinates(light_source_points)[,2],
-       pch = 21,
-       cex = 1.5,
-       bg = "yellow",
-       col = "red",
-       lwd = 2)
-
-legend("topright",
-       legend = "Light Sources (Binary)",
-       pch = 21,
-       pt.cex = 1.5,
-       pt.bg = "yellow",
-       col = "red",
-       cex = 0.8,
-       bg = "white")
-```
 
 # Save Results
 
