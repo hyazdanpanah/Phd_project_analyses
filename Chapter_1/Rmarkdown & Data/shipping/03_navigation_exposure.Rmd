@@ -32,7 +32,7 @@ knitr::opts_knit$set(root.dir = ".")
 # Source shared functions
 # Source shared functions (this will load all required packages)
 #source("/Users/hediyeh/Desktop/Phd_project_analyses/Chapter_1/00_shared_functions.R")
-source("/Users/hediyeh/Desktop/Phd_project_analyses/Chapter_1/00_shered_functions_0.00005.R")
+source("/Users/hediyeh/Desktop/Phd_project_analyses/Chapter_1/00_shered_functions_0.00001.R")
 
 # Load extra packages
 library(RColorBrewer)
@@ -325,9 +325,11 @@ cat("Non-NA cells:", sum(!is.na(values(shipping_exp))), "\n")
 ## Combined Shipping Exposure
 
 ```{r plot-combined-exposure, fig.cap="Combined shipping exposure from all vessel types using Level III decay"}
+#png("navigation.exp_0.00001.png", width = 3000, height = 2000, res = 300)
 plot_exposure(shipping_exp,
               "Shipping Traffic Exposure - All Vessel Types (Level III)",
               xmin, xmax, ymin, ymax)
+#dev.off()
 ```
 
 ## Individual Vessel Type Exposures

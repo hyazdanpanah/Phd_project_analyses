@@ -45,7 +45,7 @@ Coastal development represents a significant environmental stressor in the Sague
 
 ## Nightlight Data as Development Proxy
 
-Following established methodologies (Halpern et al., 2008), artificial nighttime illumination provides an objective, consistent measure of coastal urbanization intensity. Nightlight data effectively captures the spatial extent and intensity of human settlements, infrastructure, and economic activity in coastal zones.
+Following established methodologies (Halpern et al., 2008), artificial nighttime illumination provides an objective, consistent measure of coastal urbanization intensity. Nightlight data effectively captures the spatial extent and intensity of human settlements, infrastructure, and economic activity in coastal zones. Unlike binary classification approaches, this analysis **preserves actual light intensity values** to weight the contribution of each settlement proportionally to its development level.
 
 ## Data Sources
 
@@ -55,11 +55,12 @@ Nightlight raster data were obtained from the **Knowledge Network for Bioinforma
 
 1. **Coastal Buffer Definition**: 500m buffer from shoreline (0m bathymetric contour)
 2. **Light Source Identification**: 75th percentile threshold (top 25% of light intensity)
-3. **Binary Classification**: Sources above threshold set to value = 1 (equal weighting)
-4. **Point Source Conversion**: Raster aggregation and conversion to binary point sources
-5. **Source Optimization**: Random sampling to maximum 50 sources for computational efficiency
-6. **Spatial Decay Modeling**: Level III decay function for medium-range coastal effects
-
+3. **Intensity Preservation**: Actual light intensity values retained throughout analysis
+4. **Point Source Conversion**: Raster aggregation (2x factor) and conversion to intensity-weighted point sources
+5. **Spatial Clustering**: 500m radius clustering groups nearby sources while preserving spatial distribution
+6. **Cluster Representation**: Brightest point per cluster retained to ensure locations remain on actual coastal settlements
+7. **Intensity Weighting**: Each cluster weighted by cumulative intensity of all constituent sources
+8. **Spatial Decay Modeling**: Level III decay function for medium-range coastal effects with intensity-based weighting
 # Data Loading
 
 ## Base Data
@@ -307,42 +308,6 @@ save(coastal_exp,
      file = "coastal_development_exposure.RData")
 ```
 
-# Summary
-
-This coastal development exposure analysis successfully developed a nightlight-based model to quantify terrestrial urbanization impacts on the Saguenay Fjord ecosystem:
-
-**Key Features:**
-- **Nightlight Proxy**: Artificial light intensity as objective measure of coastal development
-- **Coastal Buffer Approach**: 500m buffer from shoreline captures near-coastal development
-- **Threshold Selection**: 75th percentile identifies significant development areas
-- **Binary Classification**: All sources above threshold treated equally (value = 1)
-- **Computational Optimization**: Random sampling to maximum 50 sources for efficient processing
-- **Water-Focused Modeling**: Effects propagate through water but blocked by land
-- **Level III decay** function applied for medium-range coastal effects
-
-**Results:**
-- **`r nrow(light_source_points)`** coastal light sources identified and processed
-- **Binary approach**: All sources weighted equally regardless of intensity
-- **Spatial pattern**: Development concentrated in major settlement areas with gradual decay into fjord
-
-**Environmental Implications:**
-
-The spatial distribution of coastal development exposure highlights areas where marine ecosystems experience cumulative impacts from:
-
-- **Light pollution** affecting marine organism behavior, reproduction, and predator-prey dynamics
-- **Urban runoff** introducing nutrients, sediments, heavy metals, and organic contaminants
-- **Chemical contamination** from residential, commercial, and industrial sources
-- **Altered freshwater inputs** affecting salinity gradients and water quality
-- **Physical habitat alteration** through coastal infrastructure and shoreline modification
-
-**Methodological Advantages:**
-
-This nightlight-based approach provides:
-- Consistent spatial coverage across the study area
-- Objective quantification of development intensity
-- Temporal repeatability for monitoring changes
-- Computational efficiency through optimized source selection
-- Direct linkage between human activity patterns and potential marine impacts
 
 # References
 
