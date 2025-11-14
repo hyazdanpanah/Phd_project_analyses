@@ -37,6 +37,7 @@ source("/Users/hediyeh/Desktop/Phd_project_analyses/Chapter_1/00_shered_function
 # Load ONLY the extra packages needed for THIS specific analysis
 library(RColorBrewer)
 library(viridis)
+library(dbscan)
 ```
 
 # Introduction
@@ -115,77 +116,30 @@ Main light sources are identified using a **75th percentile threshold**, focusin
 
 ```{r identify-light-sources}
 # ===============================================================================
-# EXTRACT INTENSITY VALUES (NOT BINARY)
+# IDENTIFY LIGHT SOURCES WITH SECTION-SPECIFIC THRESHOLDS
 # ===============================================================================
 
-# Mask nightlight to coastal buffer
+# Mask nightlight to coastal buffer (keep this global)
 light_coastal <- raster::mask(light_200, coastal_buffer_sp)
 
-# Calculate 75th percentile threshold
-light_threshold <- quantile(values(light_coastal), probs = 0.75, na.rm = TRUE)
+# DON'T apply global threshold yet - keep all coastal light
+light_sources_agg <- raster::aggregate(light_coastal, fact = 2, fun = mean)
 
-# Keep only values above threshold (KEEP INTENSITY, don't convert to binary)
-light_sources_intensity <- light_coastal
-light_sources_intensity[light_sources_intensity < light_threshold] <- NA
-
-# Aggregate to reduce points
-light_sources_agg <- raster::aggregate(light_sources_intensity, fact = 2, fun = mean)
-
-# Convert to points WITH intensity values
+# Convert ALL coastal sources to points (no threshold yet!)
 light_source_df <- raster::rasterToPoints(light_sources_agg, spatial = FALSE) %>%
   as.data.frame()
 
 colnames(light_source_df) <- c("x", "y", "light_intensity")
 
-# Convert to sf with intensity
 light_source_points <- light_source_df %>%
-  st_as_sf(coords = c("x", "y"), crs = target_crs)
+  st_as_sf(coords = c("x", "y"), crs = target_crs) %>%
+  filter(!is.na(light_intensity) & light_intensity > 0)  # Remove NA and zeros only
 
-# Calculate intensity index (0-1 scale)
+# Normalize intensity (0-1 scale)
 max_light <- max(light_source_points$light_intensity, na.rm = TRUE)
 light_source_points$intensity_index <- light_source_points$light_intensity / max_light
 
-cat("Initial light sources above threshold:", nrow(light_source_points), "\n")
-cat("Intensity range:", 
-    round(min(light_source_points$intensity_index), 3), "-",
-    round(max(light_source_points$intensity_index), 3), "\n")
-
-# ===============================================================================
-# SPATIAL CLUSTERING - KEEP HIGHEST INTENSITY POINT PER CLUSTER
-# ===============================================================================
-
-library(dbscan)
-
-# Cluster nearby light sources (500m radius)
-coords_matrix <- st_coordinates(light_source_points)
-clusters <- dbscan(coords_matrix, eps = 500, minPts = 1)
-
-cat("Created", max(clusters$cluster), "spatial clusters\n")
-
-# Keep brightest point per cluster and sum intensities
-light_source_clustered <- light_source_points %>%
-  mutate(cluster = clusters$cluster) %>%
-  group_by(cluster) %>%
-  arrange(desc(intensity_index)) %>%
-  mutate(
-    total_cluster_intensity = sum(intensity_index),
-    n_sources = n()
-  ) %>%
-  slice(1) %>%  # Keep brightest point (stays on actual settlement)
-  ungroup() %>%
-  mutate(intensity_index = total_cluster_intensity)
-
-# Renormalize
-max_intensity <- max(light_source_clustered$intensity_index)
-light_source_clustered$intensity_index <- light_source_clustered$intensity_index / max_intensity
-
-# Use clustered points
-light_source_points <- light_source_clustered
-
-cat("\n=== CLUSTERING SUMMARY ===\n")
-cat("Final clusters:", nrow(light_source_points), "\n")
-cat("Average sources per cluster:", round(mean(light_source_points$n_sources), 1), "\n")
-cat("Total original sources:", sum(light_source_points$n_sources), "\n")
+cat("Total coastal light sources (no threshold):", nrow(light_source_points), "\n")
 cat("Intensity range:", 
     round(min(light_source_points$intensity_index), 3), "-",
     round(max(light_source_points$intensity_index), 3), "\n")
@@ -213,65 +167,171 @@ template_raster <- create_template_raster(bathy_200)
 
 ```
 
-## Calculate Intensity-Weighted Coastal Development Exposure
-```{r calculate-intensity-weighted-exposure}
-# Set decay type
+
+```{r divition approach }
+# ===============================================================================
+# DIVIDE, THRESHOLD, CLUSTER - PRESERVE GLOBAL INTENSITY
+# ===============================================================================
+
+#sections <- list(
+  #Lower = list(name = "Lower Saguenay", xmin = 345000, xmax = 385000),
+  #Middle = list(name = "Middle Saguenay", xmin = 385000, xmax = 420000),
+ # Upper = list(name = "Upper Saguenay", xmin = 420000, xmax = 450000)
+#)
+
+sections <- list(
+  Section1 = list(name = "Section 1", xmin = 345000, xmax = 365000),
+  Section2 = list(name = "Section 2", xmin = 365000, xmax = 385000),
+  Section3 = list(name = "Section 3", xmin = 385000, xmax = 405000),
+  Section4 = list(name = "Section 4", xmin = 405000, xmax = 425000),
+  Section5 = list(name = "Section 5", xmin = 425000, xmax = 450000)
+)
+
 decay_type <- "III"
 
-# Calculate individual exposures
-light_exposures <- list()
+# *** CRITICAL: Calculate GLOBAL max intensity ONCE at the start ***
+global_max_intensity <- max(light_source_points$light_intensity, na.rm = TRUE)
+cat("Global max intensity:", round(global_max_intensity, 3), "\n")
+cat("This will be used to maintain proportions across all sections\n\n")
 
-for (i in 1:nrow(light_source_points)) {
-  cat("Processing cluster", i, "of", nrow(light_source_points), 
-      "- Intensity:", round(light_source_points$intensity_index[i], 3),
-      "- Sources:", light_source_points$n_sources[i], "\n")
+section_exposures <- list()
+section_summary <- list()
+
+for (section_name in names(sections)) {
   
-  intensity <- light_source_points$intensity_index[i]
+  cat("========================================\n")
+  cat("SECTION:", sections[[section_name]]$name, "\n")
+  cat("========================================\n")
   
-  # Calculate exposure for this cluster
-  single_exp <- RelativeExposure(
-    source = light_source_points[i,],
-    transition = tr_water,
-    decay_type = decay_type,
-    grid_points_sf = grid_water,
-    empty_raster = template_raster
+  # Filter sources to this section
+  sec_xmin <- sections[[section_name]]$xmin
+  sec_xmax <- sections[[section_name]]$xmax
+  
+  light_section <- light_source_points %>%
+    filter(st_coordinates(.)[,1] >= sec_xmin & 
+           st_coordinates(.)[,1] < sec_xmax)
+  
+  cat("All sources in section:", nrow(light_section), "\n")
+  
+  if (nrow(light_section) == 0) {
+    cat("No sources - skipping\n\n")
+    next
+  }
+  
+  # Apply 75th percentile threshold WITHIN section
+  section_threshold <- quantile(light_section$light_intensity, 
+                                probs = 0.75, na.rm = TRUE)
+  
+  light_section <- light_section %>%
+    filter(light_intensity >= section_threshold)
+  
+  cat("After 75th percentile filter:", nrow(light_section), "sources\n")
+  
+  if (nrow(light_section) == 0) {
+    cat("No sources above threshold - skipping\n\n")
+    next
+  }
+  
+  # *** CRITICAL: Use GLOBAL scale, not section scale ***
+  light_section$intensity_index <- light_section$light_intensity / global_max_intensity
+  
+  cat("Intensity range in section (global scale):",
+      round(min(light_section$intensity_index), 3), "-",
+      round(max(light_section$intensity_index), 3), "\n")
+  
+  # Cluster within section
+  coords_section <- st_coordinates(light_section)
+  clusters_section <- dbscan(coords_section, eps = 500, minPts = 1)
+  
+  cat("Clusters in section:", max(clusters_section$cluster), "\n")
+  
+  # Aggregate clusters - sum intensities (preserves global scale!)
+  light_section_clustered <- light_section %>%
+    mutate(cluster = clusters_section$cluster) %>%
+    group_by(cluster) %>%
+    arrange(desc(intensity_index)) %>%
+    mutate(
+      total_intensity = sum(intensity_index),  # Sum on global scale
+      n_sources = n()
+    ) %>%
+    slice(1) %>%
+    ungroup() %>%
+    mutate(intensity_index = total_intensity)  # Keep global scale!
+  
+  # *** DON'T RENORMALIZE - keep global scale! ***
+  # NO: light_section_clustered$intensity_index <- ... / max_int
+  
+  cat("Processing", nrow(light_section_clustered), "clusters\n")
+  cat("Cluster intensity range (global scale):",
+      round(min(light_section_clustered$intensity_index), 3), "-",
+      round(max(light_section_clustered$intensity_index), 3), "\n")
+  cat("Avg sources/cluster:", round(mean(light_section_clustered$n_sources), 1), "\n\n")
+  
+  # Process clusters with GLOBAL intensity weights
+  cluster_exposures <- list()
+  
+  for (i in 1:nrow(light_section_clustered)) {
+    cat("  Cluster", i, "/", nrow(light_section_clustered),
+        "- Global Intensity:", round(light_section_clustered$intensity_index[i], 3),
+        "- Sources:", light_section_clustered$n_sources[i], "\n")
+    
+    intensity <- light_section_clustered$intensity_index[i]  # Global scale weight
+    
+    single_exp <- RelativeExposure(
+      source = light_section_clustered[i,],
+      transition = tr_water,
+      decay_type = decay_type,
+      grid_points_sf = grid_water,
+      empty_raster = template_raster
+    )
+    
+    cluster_exposures[[i]] <- single_exp * intensity  # Weight by global intensity
+  }
+  
+  # Combine this section
+  section_exp <- Reduce('+', cluster_exposures)
+  section_exposures[[section_name]] <- section_exp
+  
+  section_summary[[section_name]] <- list(
+    n_sources = nrow(light_section),
+    n_clusters = nrow(light_section_clustered),
+    avg_per_cluster = mean(light_section_clustered$n_sources),
+    max_intensity_global = max(light_section_clustered$intensity_index)
   )
   
-  # Weight by intensity
-  light_exposures[[i]] <- single_exp * intensity
+  cat("Section", section_name, "complete!\n")
+  cat("Max cluster intensity in this section (global scale):",
+      round(section_summary[[section_name]]$max_intensity_global, 3), "\n\n")
 }
 
-# ===============================================================================
-# COMBINE AND NORMALIZE WITH PROPER MASKING
-# ===============================================================================
+# Combine all sections
+cat("========================================\n")
+cat("COMBINING ALL SECTIONS\n")
+cat("========================================\n")
 
-# Filter out any NULL exposures 
-valid_exposures <- light_exposures[!sapply(light_exposures, is.null)]
+combined_exposure <- Reduce('+', section_exposures)
 
-# Combine all weighted exposures
-combined_exposure <- Reduce('+', valid_exposures)
-
-# Normalize to 0-1 scale
+# Final normalization to 0-1 (only done once at the end)
 max_val <- cellStats(combined_exposure, stat = "max", na.rm = TRUE)
 combined_exposure <- combined_exposure / max_val
 
-# Create fjord mask: TRUE for any area with bathymetry data (water OR land)
 fjord_mask <- !is.na(bathy_200)
-
-# Verify the mask
-cat("Fjord mask check:\n")
-print(table(values(fjord_mask), useNA = "always"))
-
-# Apply intelligent masking:
-# 1. In water areas with 0 exposure: set to small value (shows as light gray)
 combined_exposure[fjord_mask & combined_exposure == 0] <- 0.0001
-
-# 2. In land areas: set to NA (shows as white)
 combined_exposure[!fjord_mask] <- NA
 
-# Final exposure
 coastal_exp <- combined_exposure
 
+# Summary
+cat("\n=== SUMMARY (with global intensity preserved) ===\n")
+for (sec in names(section_summary)) {
+  cat(sec, ":\n")
+  cat("  Clusters:", section_summary[[sec]]$n_clusters, 
+      "from", section_summary[[sec]]$n_sources, "sources\n")
+  cat("  Max intensity (global scale):", 
+      round(section_summary[[sec]]$max_intensity_global, 3), "\n")
+}
+cat("\nTotal clusters:", sum(sapply(section_summary, function(x) x$n_clusters)), "\n")
+cat("Final max exposure:", round(max_val, 6), "\n")
 ```
 
 
@@ -280,9 +340,9 @@ coastal_exp <- combined_exposure
 ## Coastal Development Exposure
 
 ```{r plot-coastal-exposure, fig.cap="Coastal development exposure using binary nightlight classification with Level III decay"}
-#png("coastal_development_0.00001.png")
+#png("coastal_development_6_sections_0.00001.png")
 plot_exposure(coastal_exp,
-              "Coastal Development Exposure -  inensity approach (Level III)",
+              "Coastal Development Exposure -  6 sections approach (Level III)",
               xmin, xmax, ymin, ymax)
 #dev.off()
 ```
