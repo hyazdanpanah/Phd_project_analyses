@@ -1,0 +1,960 @@
+
+---
+title: "Exposure Calibration - Saguenay Fjord"
+author: "Your Name"
+date: "`r Sys.Date()`"
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: show
+    theme: cosmo
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE, fig.width = 10, fig.height = 6)
+```
+
+# 1. Load Libraries
+```{r libraries}
+library(raster)
+library(sf)
+library(dplyr)
+library(ggplot2)
+library(tidyr)
+library(knitr)
+library(corrplot)
+
+```
+
+# 2. Load Benthic Data with Shannon Index
+```{r load_benthic}
+# Load the benthic data we created earlier
+benthic_data <- read.csv("benthic_data_complete.csv")
+
+# Convert to spatial object
+benthic_sf <- st_as_sf(benthic_data,
+                       coords = c("Longitude", "Latitude"),
+                       crs = 4326)
+
+# Transform to UTM 19N (same as exposure rasters)
+benthic_sf <- st_transform(benthic_sf, crs = 32619)
+
+# Summary
+cat("Number of stations:", nrow(benthic_sf), "\n")
+cat("Shannon Index range:", range(benthic_sf$Shannon_Index), "\n")
+
+# Preview
+head(benthic_sf)
+```
+
+# 3. Define Stressors and Coefficients
+```{r define_parameters}
+# List of stressors (based on your files)
+stressors <- c(
+  "agriculture",
+  "coastal_development",
+  "ice_fishing",
+  "wwtp",
+  "forestry"
+)
+
+# Coefficients to test
+coefficients <- c(0.00001, 0.00005, 0.000025)
+
+cat("Stressors:", length(stressors), "\n")
+cat("Coefficients to test:", coefficients, "\n")
+```
+
+# 4. Load Exposure Rasters Function
+
+```{r load exposure}
+# ================================================================
+# CORRECTED FUNCTION - Fixed coastal_development and rounding
+# ================================================================
+
+load_exposure_raster <- function(stressor, coefficient) {
+  
+  # Convert to string with ENOUGH decimal places
+  # Use 6 decimals to preserve 0.000025
+  coef_str <- sprintf("%.6f", coefficient)  # Changed from %.5f to %.6f
+  
+  # Remove trailing zeros but keep at least 5 decimals for 0.00001
+  coef_str <- gsub("0+$", "", coef_str)  # Remove trailing zeros
+  if (!grepl("\\.", coef_str)) {
+    coef_str <- paste0(coef_str, ".0")
+  }
+  
+  # For ice_fishing and coastal_development (no "0." prefix)
+  coef_str_short <- gsub("^0+\\.", "", sprintf("%.6f", coefficient))
+  coef_str_short <- gsub("0+$", "", coef_str_short)
+  
+  cat("    Looking for coefficient format:", coef_str, "(short:", coef_str_short, ")\n")
+  
+  # Try different file naming patterns based on stressor
+  file_path <- NULL
+  
+  if (stressor == "agriculture") {
+    # Pattern: agriculture_exposure.0.00001.tif
+    file_path <- sprintf("agriculture_exposure.%s.tif", coef_str)
+    
+  } else if (stressor == "coastal_development") {
+    # Pattern: coastal_development_exposure.00001.tif (NO "0." prefix, like ice_fishing)
+    file_path <- sprintf("coastal_development_exposure.%s.tif", coef_str_short)
+    
+  } else if (stressor == "ice_fishing") {
+    # Pattern: ice_fishing_exposure.00001.tif (no "0." prefix)
+    file_path <- sprintf("ice_fishing_exposure.%s.tif", coef_str_short)
+    
+  } else if (stressor == "wwtp") {
+    # Pattern: wwtp_exposure_0.00001.tif (underscore before coefficient)
+    file_path <- sprintf("wwtp_exposure_%s.tif", coef_str)
+    
+  } else if (stressor == "forestry") {
+    # Pattern: forestry_exposure.0.00001.RData
+    file_path <- sprintf("forestry_exposure.%s.RData", coef_str)
+  }
+  
+  # Print what we're looking for
+  cat("    Trying to load:", file_path, "\n")
+  
+  # Check if file exists
+  if (file.exists(file_path)) {
+    
+    if (stressor == "forestry") {
+      # Load .RData file
+      env <- new.env()
+      load(file_path, envir = env)
+      
+      # Try to find the raster object
+      obj_names <- ls(envir = env)
+      
+      # Look for raster objects
+      for (obj_name in obj_names) {
+        obj <- get(obj_name, envir = env)
+        if (inherits(obj, c("RasterLayer", "RasterStack", "RasterBrick"))) {
+          cat("    ✓ Found raster in .RData:", obj_name, "\n")
+          return(obj)
+        }
+      }
+      
+      warning(paste("No raster found in", file_path))
+      return(NULL)
+      
+    } else {
+      # Load .tif file
+      return(raster(file_path))
+    }
+    
+  } else {
+    cat("    ✗ File not found:", file_path, "\n")
+    
+    # Try listing similar files to help debug
+    pattern <- paste0("^", stressor)
+    similar_files <- list.files(pattern = pattern)
+    
+    if (length(similar_files) > 0) {
+      cat("    Similar files found:", paste(head(similar_files, 5), collapse = ", "), "\n")
+    }
+    
+    return(NULL)
+  }
+}
+```
+
+
+# 5. Calculate Cumulative Exposure for Each Coefficient
+
+```{r calculate_cumulative }
+# Initialize results dataframe
+results <- data.frame(
+  Coefficient = numeric(),
+  Correlation_Spearman = numeric(),
+  Correlation_Pearson = numeric(),
+  R_squared = numeric(),
+  P_value = numeric()
+)
+
+# Store cumulative rasters for later visualization
+cumulative_rasters <- list()
+
+# Loop through each coefficient
+for (coef in coefficients) {
+  
+  cat("\n========================================\n")
+  cat("Processing coefficient:", coef, "\n")
+  cat("========================================\n")
+  
+  # Initialize cumulative exposure raster
+  cumulative_exposure <- NULL
+  loaded_count <- 0
+  
+  # Load and sum all stressor exposures
+  for (stressor in stressors) {
+    
+    exposure_rast <- load_exposure_raster(stressor, coef)
+    
+    if (!is.null(exposure_rast)) {
+      
+      if (is.null(cumulative_exposure)) {
+        # First raster - initialize
+        cumulative_exposure <- exposure_rast
+      } else {
+        # Add to cumulative
+        cumulative_exposure <- cumulative_exposure + exposure_rast
+      }
+      
+      loaded_count <- loaded_count + 1
+      cat("  ✓ Loaded", stressor, "\n")
+      
+    } else {
+      cat("  ✗ Failed to load", stressor, "\n")
+    }
+  }
+  
+  cat("  Total stressors loaded:", loaded_count, "out of", length(stressors), "\n")
+  
+  if (!is.null(cumulative_exposure)) {
+    
+    # Normalize to 0-1 range
+    max_val <- cellStats(cumulative_exposure, "max", na.rm = TRUE)
+    if (!is.na(max_val) && max_val > 0) {
+      cumulative_exposure <- cumulative_exposure / max_val
+    }
+    
+    # Store for later
+    cumulative_rasters[[as.character(coef)]] <- cumulative_exposure
+    
+    # Extract at benthic stations - USE raster::extract() EXPLICITLY
+    extracted_values <- raster::extract(cumulative_exposure, st_coordinates(benthic_sf))
+    
+    # Add to benthic data
+    benthic_sf[[paste0("Exposure_", coef)]] <- extracted_values
+    
+    # Calculate correlations
+    valid_idx <- complete.cases(extracted_values, benthic_sf$Shannon_Index)
+    
+    if (sum(valid_idx) > 10) {
+      
+      spearman_cor <- cor(extracted_values[valid_idx],
+                          benthic_sf$Shannon_Index[valid_idx],
+                          method = "spearman")
+      
+      pearson_cor <- cor(extracted_values[valid_idx],
+                         benthic_sf$Shannon_Index[valid_idx],
+                         method = "pearson")
+      
+      # Linear model
+      model <- lm(Shannon_Index ~ extracted_values, 
+                  data = data.frame(Shannon_Index = benthic_sf$Shannon_Index[valid_idx],
+                                   extracted_values = extracted_values[valid_idx]))
+      
+      r_squared <- summary(model)$r.squared
+      p_value <- summary(model)$coefficients[2, 4]  # P-value for slope
+      
+      # Store results
+      results <- rbind(results, data.frame(
+        Coefficient = coef,
+        Correlation_Spearman = spearman_cor,
+        Correlation_Pearson = pearson_cor,
+        R_squared = r_squared,
+        P_value = p_value
+      ))
+      
+      cat("  Spearman correlation:", round(spearman_cor, 4), "\n")
+      cat("  Pearson correlation:", round(pearson_cor, 4), "\n")
+      cat("  R²:", round(r_squared, 4), "\n")
+      cat("  P-value:", format.pval(p_value), "\n")
+      
+    } else {
+      cat("  ✗ Not enough valid data points for correlation\n")
+    }
+    
+  } else {
+    cat("  ✗ Failed to create cumulative exposure\n")
+  }
+}
+```
+
+# 6. Results Summary
+```{r results_table}
+# Sort by absolute Spearman correlation
+results <- results %>%
+  mutate(Abs_Correlation = abs(Correlation_Spearman)) %>%
+  arrange(desc(Abs_Correlation))
+
+# Display results table
+kable(results, digits = 4, caption = "Calibration Results - All Coefficients")
+
+# Best coefficient
+best_coef <- results$Coefficient[1]
+best_cor <- results$Correlation_Spearman[1]
+
+cat("\n========================================\n")
+cat("BEST COEFFICIENT:", best_coef, "\n")
+cat("SPEARMAN CORRELATION:", round(best_cor, 4), "\n")
+cat("========================================\n")
+```
+
+# 7. Visualization: Correlation by Coefficient
+```{r plot_correlation_curve}
+ggplot(results, aes(x = Coefficient, y = Correlation_Spearman)) +
+  geom_line(size = 1.5, color = "steelblue") +
+  geom_point(size = 4, color = "darkblue") +
+  geom_point(data = results %>% filter(Coefficient == best_coef),
+             size = 6, color = "red", shape = 21, fill = "yellow") +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "gray50") +
+  labs(
+    title = "Calibration Curve: Correlation vs Coefficient",
+    subtitle = paste("Best coefficient:", best_coef, "| Correlation:", round(best_cor, 4)),
+    x = "Coefficient Value",
+    y = "Spearman Correlation"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    plot.title = element_text(face = "bold", size = 16),
+    panel.grid.major = element_line(color = "gray90"),
+    panel.grid.minor = element_blank()
+  )
+```
+
+# 8. Scatter Plots: Shannon Index vs Exposure
+```{r scatter_plots, fig.height=10}
+# Prepare data for plotting
+plot_data <- benthic_sf %>%
+  st_drop_geometry() %>%
+  select(Station, Shannon_Index, starts_with("Exposure_")) %>%
+  pivot_longer(cols = starts_with("Exposure_"),
+               names_to = "Coefficient",
+               values_to = "Exposure") %>%
+  mutate(Coefficient = gsub("Exposure_", "", Coefficient))
+
+# Create scatter plots for each coefficient
+ggplot(plot_data, aes(x = Exposure, y = Shannon_Index)) +
+  geom_point(size = 3, alpha = 0.6, color = "steelblue") +
+  geom_smooth(method = "lm", color = "red", fill = "pink", alpha = 0.3) +
+  facet_wrap(~Coefficient, ncol = 1, scales = "free_x",
+             labeller = labeller(Coefficient = function(x) paste("Coefficient:", x))) +
+  labs(
+    title = "Shannon Index vs Cumulative Exposure",
+    subtitle = "Each panel shows a different coefficient value",
+    x = "Cumulative Exposure (normalized 0-1)",
+    y = "Shannon Diversity Index"
+  ) +
+  theme_bw(base_size = 12) +
+  theme(
+    strip.background = element_rect(fill = "lightblue"),
+    strip.text = element_text(face = "bold")
+  )
+```
+
+# 9. Best Model Diagnostics
+```{r best_model_diagnostics}
+# Extract data for best coefficient
+best_exposure <- benthic_sf[[paste0("Exposure_", best_coef)]]
+valid_idx <- complete.cases(best_exposure, benthic_sf$Shannon_Index)
+
+# Fit model
+best_model <- lm(Shannon_Index ~ best_exposure,
+                 data = data.frame(
+                   Shannon_Index = benthic_sf$Shannon_Index[valid_idx],
+                   best_exposure = best_exposure[valid_idx]
+                 ))
+
+# Model summary
+cat("\n========================================\n")
+cat("BEST MODEL SUMMARY\n")
+cat("Coefficient:", best_coef, "\n")
+cat("========================================\n")
+print(summary(best_model))
+
+# Diagnostic plots
+par(mfrow = c(2, 2))
+plot(best_model, main = paste("Coefficient:", best_coef))
+par(mfrow = c(1, 1))
+```
+
+# 10. Spatial Maps Comparison
+```{r spatial_maps, fig.height=12}
+par(mfrow = c(length(coefficients), 1), mar = c(4, 4, 3, 6))
+
+for (i in seq_along(coefficients)) {
+  coef <- coefficients[i]
+  
+  if (!is.null(cumulative_rasters[[as.character(coef)]])) {
+    
+    # Plot exposure map
+    plot(cumulative_rasters[[as.character(coef)]],
+         main = paste("Cumulative Exposure - Coefficient:", coef,
+                     "| Correlation:", round(results$Correlation_Spearman[i], 3)),
+         col = terrain.colors(100))
+    
+    # Overlay stations colored by Shannon Index
+    points(st_coordinates(benthic_sf),
+           pch = 21,
+           bg = terrain.colors(100)[cut(benthic_sf$Shannon_Index, breaks = 100)],
+           cex = 1.5,
+           lwd = 1)
+    
+    # Highlight best coefficient
+    if (coef == best_coef) {
+      mtext("*** BEST MODEL ***", side = 3, line = 0.5, col = "red", font = 2, cex = 1.2)
+    }
+  }
+}
+
+par(mfrow = c(1, 1))
+```
+
+# 11. Save Best Cumulative Exposure
+```{r save_best}
+# Save the best cumulative exposure raster
+best_cumulative <- cumulative_rasters[[as.character(best_coef)]]
+
+if (!is.null(best_cumulative)) {
+  writeRaster(best_cumulative, 
+              "cumulative_exposure_BEST.tif",
+              overwrite = TRUE)
+  
+  cat("✓ Saved best cumulative exposure to: cumulative_exposure_BEST.tif\n")
+}
+
+# Save benthic data with all exposure values
+benthic_export <- benthic_sf %>%
+  st_drop_geometry()
+
+write.csv(benthic_export, 
+          "benthic_with_exposures.csv",
+          row.names = FALSE)
+
+cat("✓ Saved benthic data with exposures to: benthic_with_exposures.csv\n")
+
+# Save results table
+write.csv(results, 
+          "calibration_results.csv",
+          row.names = FALSE)
+
+cat("✓ Saved calibration results to: calibration_results.csv\n")
+```
+
+# 12. Conclusions
+```{r conclusions}
+cat("\n========================================\n")
+cat("CALIBRATION CONCLUSIONS\n")
+cat("========================================\n\n")
+
+cat("Based on", nrow(benthic_sf), "sampling stations:\n\n")
+
+cat("BEST COEFFICIENT:", best_coef, "\n")
+cat("  - Spearman correlation:", round(best_cor, 4), "\n")
+cat("  - R²:", round(results$R_squared[1], 4), "\n")
+cat("  - P-value:", format.pval(results$P_value[1]), "\n\n")
+
+if (abs(best_cor) > 0.5) {
+  cat("✓ STRONG correlation between exposure and Shannon Index\n")
+} else if (abs(best_cor) > 0.3) {
+  cat("✓ MODERATE correlation between exposure and Shannon Index\n")
+} else {
+  cat("⚠ WEAK correlation between exposure and Shannon Index\n")
+  cat("  Consider: - Adding more stressors\n")
+  cat("           - Checking stressor locations\n")
+  cat("           - Reviewing decay types\n")
+}
+
+cat("\nNext steps:\n")
+cat("1. Use coefficient", best_coef, "in your final exposure model\n")
+cat("2. Review spatial patterns in the maps above\n")
+cat("3. Consider if results make ecological sense\n")
+```
+
+
+
+```{r test why}
+# =================================================================
+# CORRECTED DIAGNOSTICS
+# =================================================================
+
+library(ggplot2)
+
+# Get data ready - FIX THE COLUMN NAME REFERENCE
+benthic_df <- benthic_sf %>%
+  st_drop_geometry() %>%
+  mutate(
+    Latitude = st_coordinates(benthic_sf)[,2],
+    Longitude = st_coordinates(benthic_sf)[,1],
+    Exposure = `Exposure_2.5e-05`  # Use backticks!
+  )
+
+# Alternative if backticks don't work:
+# benthic_df$Exposure <- benthic_df[[paste0("Exposure_", 2.5e-05)]]
+
+# =================================================================
+# 1. WHERE ARE HIGH/LOW SHANNON VALUES?
+# =================================================================
+cat("\n========================================\n")
+cat("SHANNON INDEX DISTRIBUTION\n")
+cat("========================================\n")
+summary(benthic_df$Shannon_Index)
+
+# Which stations have lowest diversity?
+low_diversity <- benthic_df %>%
+  arrange(Shannon_Index) %>%
+  head(10) %>%
+  select(Station, Shannon_Index, Exposure, Sector, Depth)
+
+cat("\nLowest Diversity Stations:\n")
+print(low_diversity)
+
+# Which stations have highest diversity?
+high_diversity <- benthic_df %>%
+  arrange(desc(Shannon_Index)) %>%
+  head(10) %>%
+  select(Station, Shannon_Index, Exposure, Sector, Depth)
+
+cat("\nHighest Diversity Stations:\n")
+print(high_diversity)
+
+# =================================================================
+# 2. EXPOSURE DISTRIBUTION
+# =================================================================
+cat("\n========================================\n")
+cat("EXPOSURE DISTRIBUTION\n")
+cat("========================================\n")
+summary(benthic_df$Exposure)
+
+cat("\nStations with HIGHEST exposure:\n")
+high_exposure <- benthic_df %>%
+  arrange(desc(Exposure)) %>%
+  head(10) %>%
+  select(Station, Shannon_Index, Exposure, Sector)
+print(high_exposure)
+
+cat("\nStations with LOWEST exposure:\n")
+low_exposure <- benthic_df %>%
+  arrange(Exposure) %>%
+  head(10) %>%
+  select(Station, Shannon_Index, Exposure, Sector)
+print(low_exposure)
+
+# =================================================================
+# 3. DO HIGH EXPOSURE STATIONS HAVE LOW DIVERSITY?
+# =================================================================
+cat("\n========================================\n")
+cat("CROSS-CHECK: Exposure vs Shannon\n")
+cat("========================================\n")
+
+# Split into exposure groups
+benthic_df$Exposure_Group <- cut(benthic_df$Exposure, 
+                                  breaks = 3, 
+                                  labels = c("Low", "Medium", "High"))
+
+# Compare Shannon by exposure group
+cat("\nShannon Index by Exposure Level:\n")
+shannon_by_exp <- benthic_df %>%
+  group_by(Exposure_Group) %>%
+  summarise(
+    N = n(),
+    Mean_Shannon = mean(Shannon_Index, na.rm = TRUE),
+    SD_Shannon = sd(Shannon_Index, na.rm = TRUE),
+    .groups = "drop"
+  )
+print(shannon_by_exp)
+
+# =================================================================
+# 4. WHAT ABOUT NATURAL FACTORS?
+# =================================================================
+cat("\n========================================\n")
+cat("CORRELATIONS WITH ALL VARIABLES\n")
+cat("========================================\n")
+
+# Check all possible correlations
+numeric_vars <- names(benthic_df)[sapply(benthic_df, is.numeric)]
+correlations <- data.frame(
+  Variable = character(),
+  Correlation = numeric(),
+  stringsAsFactors = FALSE
+)
+
+for (var in numeric_vars) {
+  if (var != "Shannon_Index" && sum(!is.na(benthic_df[[var]])) > 10) {
+    corr <- cor(benthic_df[[var]], benthic_df$Shannon_Index, 
+                use = "complete.obs", method = "spearman")
+    correlations <- rbind(correlations, 
+                         data.frame(Variable = var, Correlation = corr,
+                                   stringsAsFactors = FALSE))
+  }
+}
+
+correlations <- correlations %>%
+  arrange(desc(abs(Correlation)))
+
+print(correlations)
+
+cat("\n*** Variables with |correlation| > 0.3 are potentially important! ***\n")
+
+# =================================================================
+# 5. VISUALIZATIONS
+# =================================================================
+
+# Shannon vs Latitude
+p1 <- ggplot(benthic_df, aes(x = Latitude, y = Shannon_Index)) +
+  geom_point(aes(color = Exposure), size = 3) +
+  geom_smooth(method = "loess", color = "red") +
+  scale_color_gradient(low = "blue", high = "red") +
+  labs(title = "Does Shannon Index change along the fjord?",
+       subtitle = "Points colored by exposure level") +
+  theme_minimal()
+
+print(p1)
+
+# Shannon vs Depth
+if ("Depth" %in% names(benthic_df)) {
+  p2 <- ggplot(benthic_df, aes(x = Depth, y = Shannon_Index)) +
+    geom_point(aes(color = Exposure), size = 3) +
+    geom_smooth(method = "loess", color = "blue") +
+    scale_color_gradient(low = "blue", high = "red") +
+    labs(title = "Is depth more important than exposure?") +
+    theme_minimal()
+  
+  print(p2)
+}
+
+# Shannon by Sector
+if ("Sector" %in% names(benthic_df)) {
+  p3 <- ggplot(benthic_df, aes(x = Sector, y = Shannon_Index, fill = Sector)) +
+    geom_boxplot() +
+    stat_summary(fun = mean, geom = "point", shape = 23, size = 3) +
+    labs(title = "Shannon Index by Sector",
+         subtitle = "Diamond = mean") +
+    theme_minimal() +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+  
+  print(p3)
+}
+
+# Exposure vs Shannon scatter with sector colors
+if ("Sector" %in% names(benthic_df)) {
+  p4 <- ggplot(benthic_df, aes(x = Exposure, y = Shannon_Index, color = Sector)) +
+    geom_point(size = 3, alpha = 0.7) +
+    geom_smooth(method = "lm", se = FALSE, color = "black", linetype = "dashed") +
+    labs(title = "Shannon Index vs Cumulative Exposure",
+         subtitle = "Colored by sector - showing weak relationship") +
+    theme_minimal()
+  
+  print(p4)
+}
+
+# =================================================================
+# 6. CHECK INDIVIDUAL STRESSORS
+# =================================================================
+
+cat("\n========================================\n")
+cat("INDIVIDUAL STRESSOR ANALYSIS\n")
+cat("========================================\n")
+
+individual_results <- data.frame(
+  Stressor = character(),
+  Correlation = numeric(),
+  Mean_Exposure = numeric(),
+  stringsAsFactors = FALSE
+)
+
+for (stressor in c("agriculture", "coastal_development", "ice_fishing", "wwtp", "forestry")) {
+  
+  exp_rast <- load_exposure_raster(stressor, 0.000025)
+  
+  if (!is.null(exp_rast)) {
+    # Normalize
+    max_val <- cellStats(exp_rast, "max", na.rm = TRUE)
+    if (!is.na(max_val) && max_val > 0) {
+      exp_rast <- exp_rast / max_val
+    }
+    
+    # Extract
+    exp_vals <- raster::extract(exp_rast, st_coordinates(benthic_sf))
+    
+    # Stats
+    valid <- complete.cases(exp_vals, benthic_sf$Shannon_Index)
+    if (sum(valid) > 10) {
+      corr <- cor(exp_vals[valid], benthic_sf$Shannon_Index[valid], method = "spearman")
+      mean_exp <- mean(exp_vals[valid], na.rm = TRUE)
+      
+      individual_results <- rbind(individual_results,
+                                 data.frame(Stressor = stressor,
+                                          Correlation = corr,
+                                          Mean_Exposure = mean_exp,
+                                          stringsAsFactors = FALSE))
+    }
+  }
+}
+
+individual_results <- individual_results %>%
+  arrange(desc(abs(Correlation)))
+
+cat("\nIndividual Stressor Correlations:\n")
+print(individual_results)
+
+# Plot
+if (nrow(individual_results) > 0) {
+  barplot(individual_results$Correlation,
+          names.arg = individual_results$Stressor,
+          las = 2,
+          col = ifelse(individual_results$Correlation < 0, "red", "blue"),
+          main = "Individual Stressor Correlations",
+          ylab = "Spearman Correlation",
+          ylim = c(min(individual_results$Correlation) - 0.1,
+                   max(individual_results$Correlation) + 0.1))
+  abline(h = 0, lty = 2)
+  abline(h = c(-0.3, 0.3), lty = 2, col = "green")
+  text(x = 1, y = 0.3, "Moderate correlation", pos = 3, col = "green", cex = 0.8)
+}
+```
+```{r try calibration with abumdance }
+# TEST WITH TOTAL ABUNDANCE INSTEAD OF SHANNON INDEX
+library(raster)
+library(sf)
+library(dplyr)
+library(ggplot2)
+
+# Reload benthic data
+benthic_df <- benthic_sf %>%
+  st_drop_geometry() %>%
+  mutate(
+    Latitude = st_coordinates(benthic_sf)[,2],
+    Longitude = st_coordinates(benthic_sf)[,1]
+  )
+
+cat("========================================\n")
+cat("CALIBRATION WITH TOTAL ABUNDANCE\n")
+cat("========================================\n\n")
+
+# Check abundance distribution
+cat("Total Abundance Distribution:\n")
+summary(benthic_df$Total_Abundance)
+hist(benthic_df$Total_Abundance, breaks = 20, 
+     main = "Distribution of Total Abundance",
+     xlab = "Total Abundance", col = "lightblue")
+
+# Test all three existing coefficients
+abundance_results <- data.frame(
+  Coefficient = numeric(),
+  Correlation_Spearman = numeric(),
+  Correlation_Pearson = numeric(),
+  R_squared = numeric(),
+  P_value = numeric()
+)
+
+for (coef in c(0.00001, 0.00005, 0.000025)) {
+  
+  cat("\n--- Coefficient:", coef, "---\n")
+  
+  # Get exposure for this coefficient
+  exposure_col <- paste0("Exposure_", format(coef, scientific = TRUE))
+  
+  if (exposure_col %in% names(benthic_df)) {
+    
+    exposure <- benthic_df[[exposure_col]]
+    abundance <- benthic_df$Total_Abundance
+    
+    # Remove NAs
+    valid_idx <- complete.cases(exposure, abundance)
+    
+    if (sum(valid_idx) > 10) {
+      
+      # Correlations
+      spearman <- cor(exposure[valid_idx], abundance[valid_idx], 
+                      method = "spearman")
+      pearson <- cor(exposure[valid_idx], abundance[valid_idx], 
+                     method = "pearson")
+      
+      # Linear model
+      model <- lm(abundance ~ exposure, 
+                  data = data.frame(abundance = abundance[valid_idx],
+                                   exposure = exposure[valid_idx]))
+      
+      r2 <- summary(model)$r.squared
+      pval <- summary(model)$coefficients[2, 4]
+      
+      abundance_results <- rbind(abundance_results, data.frame(
+        Coefficient = coef,
+        Correlation_Spearman = spearman,
+        Correlation_Pearson = pearson,
+        R_squared = r2,
+        P_value = pval
+      ))
+      
+      cat("Spearman correlation:", round(spearman, 4), "\n")
+      cat("R²:", round(r2, 4), "\n")
+      cat("P-value:", format.pval(pval), "\n")
+    }
+  }
+}
+
+# Results table
+cat("\n========================================\n")
+cat("RESULTS SUMMARY - ABUNDANCE\n")
+cat("========================================\n")
+print(abundance_results)
+
+# Find best
+best_idx <- which.max(abs(abundance_results$Correlation_Spearman))
+cat("\nBest coefficient for ABUNDANCE:", 
+    abundance_results$Coefficient[best_idx], "\n")
+cat("Correlation:", 
+    round(abundance_results$Correlation_Spearman[best_idx], 4), "\n")
+
+# ================================================================
+# VISUALIZE: ABUNDANCE VS EXPOSURE
+# ================================================================
+
+# Use best coefficient
+best_coef <- abundance_results$Coefficient[best_idx]
+best_exposure_col <- paste0("Exposure_", format(best_coef, scientific = TRUE))
+
+benthic_df$Best_Exposure <- benthic_df[[best_exposure_col]]
+
+# Scatter plot
+ggplot(benthic_df, aes(x = Best_Exposure, y = Total_Abundance)) +
+  geom_point(aes(color = Sector), size = 3, alpha = 0.7) +
+  geom_smooth(method = "lm", color = "black", linetype = "dashed") +
+  labs(
+    title = "Total Abundance vs Cumulative Exposure",
+    subtitle = paste("Coefficient:", best_coef, 
+                     "| Correlation:", 
+                     round(abundance_results$Correlation_Spearman[best_idx], 3)),
+    x = "Cumulative Exposure",
+    y = "Total Abundance (individuals)"
+  ) +
+  theme_minimal(base_size = 14)
+
+# ================================================================
+# COMPARE: SHANNON VS ABUNDANCE
+# ================================================================
+
+cat("\n========================================\n")
+cat("COMPARISON: Shannon Index vs Abundance\n")
+cat("========================================\n\n")
+
+# For the same coefficient, which response variable is better?
+comparison <- data.frame(
+  Coefficient = c(0.00001, 0.00005, 0.000025),
+  Shannon_Correlation = c(-0.093, -0.027, -0.102),  # From earlier
+  Abundance_Correlation = abundance_results$Correlation_Spearman
+)
+
+print(comparison)
+
+# Which is more sensitive?
+cat("\n")
+if (max(abs(comparison$Abundance_Correlation)) > 
+    max(abs(comparison$Shannon_Correlation))) {
+  cat("✓
+```
+```{r comparison}
+# ================================================================
+# COMPLETE COMPARISON
+# ================================================================
+
+cat("\n========================================\n")
+cat("COMPARISON: Shannon Index vs Abundance\n")
+cat("========================================\n\n")
+
+# Comparison table
+comparison <- data.frame(
+  Coefficient = c(0.00001, 0.00005, 0.000025),
+  Shannon_Correlation = c(-0.093, -0.027, -0.102),
+  Abundance_Correlation = c(0.1283, 0.1246, 0.1164)
+)
+
+print(comparison)
+
+# Which is more sensitive?
+cat("\n")
+if (max(abs(comparison$Abundance_Correlation)) > 
+    max(abs(comparison$Shannon_Correlation))) {
+  cat("✓ ABUNDANCE shows STRONGER correlation than Shannon Index!\n\n")
+} else {
+  cat("✗ Shannon Index shows stronger correlation than Abundance\n\n")
+}
+
+# The key insight
+cat("========================================\n")
+cat("KEY FINDING:\n")
+cat("========================================\n")
+cat("Exposure shows OPPOSITE effects:\n")
+cat("  • Shannon Index: NEGATIVE correlation (-0.10)\n")
+cat("  • Abundance:     POSITIVE correlation (+0.13)\n\n")
+cat("Interpretation:\n")
+cat("High exposure areas have:\n")
+cat("  ✓ MORE individuals (organic enrichment)\n")
+cat("  ✓ FEWER species (pollution-intolerant species lost)\n\n")
+cat("This is a CLASSIC organic pollution signature!\n")
+cat("========================================\n")
+
+# ================================================================
+# VISUALIZE BOTH METRICS TOGETHER
+# ================================================================
+
+library(gridExtra)
+
+# Shannon vs Exposure
+p1 <- ggplot(benthic_df, aes(x = `Exposure_1e-05`, y = Shannon_Index)) +
+  geom_point(aes(color = Sector), size = 3, alpha = 0.7) +
+  geom_smooth(method = "lm", color = "red", se = TRUE) +
+  labs(
+    title = "Shannon Index vs Exposure",
+    subtitle = "Negative trend (r = -0.09)",
+    x = "Cumulative Exposure",
+    y = "Shannon Diversity Index"
+  ) +
+  theme_minimal(base_size = 12)
+
+# Abundance vs Exposure
+p2 <- ggplot(benthic_df, aes(x = `Exposure_1e-05`, y = Total_Abundance)) +
+  geom_point(aes(color = Sector), size = 3, alpha = 0.7) +
+  geom_smooth(method = "lm", color = "blue", se = TRUE) +
+  labs(
+    title = "Total Abundance vs Exposure",
+    subtitle = "Positive trend (r = +0.13)",
+    x = "Cumulative Exposure",
+    y = "Total Abundance"
+  ) +
+  theme_minimal(base_size = 12)
+
+# Side by side
+grid.arrange(p1, p2, ncol = 2,
+             top = "OPPOSITE EFFECTS: Organic Enrichment Pattern")
+
+# ================================================================
+# CHECK HIGH EXPOSURE STATIONS IN DETAIL
+# ================================================================
+
+cat("\n========================================\n")
+cat("HIGH EXPOSURE STATIONS - DETAILED VIEW\n")
+cat("========================================\n\n")
+
+high_exp <- benthic_df %>%
+  arrange(desc(`Exposure_1e-05`)) %>%
+  head(10) %>%
+  select(Station, Shannon_Index, Total_Abundance, 
+         Species_Richness, Exposure = `Exposure_1e-05`, Sector)
+
+print(high_exp)
+
+cat("\nPattern Check:\n")
+cat("Mean Shannon (high exposure):", 
+    mean(high_exp$Shannon_Index), "\n")
+cat("Mean Abundance (high exposure):", 
+    mean(high_exp$Total_Abundance), "\n")
+
+low_exp <- benthic_df %>%
+  filter(`Exposure_1e-05` < 0.001) %>%
+  summarise(
+    Mean_Shannon = mean(Shannon_Index),
+    Mean_Abundance = mean(Total_Abundance)
+  )
+
+cat("\nMean Shannon (low exposure):", 
+    low_exp$Mean_Shannon, "\n")
+cat("Mean Abundance (low exposure):", 
+    low_exp$Mean_Abundance, "\n")
+```

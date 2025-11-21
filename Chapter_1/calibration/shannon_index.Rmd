@@ -1,0 +1,371 @@
+---
+title: "calibration"
+author: "Hediyeh"
+date: "2025-11-18"
+output: html_document
+---
+
+```{r load packages}
+# Load packages
+library(readxl)
+library(dplyr)
+library(vegan)
+library(tidyr)
+library(sf)
+```
+
+```{r explore data }
+# ================================================================
+# EXPLORE Bio_WormsDone.xlsx
+# ================================================================
+
+# See what sheets are in the file
+excel_sheets("Bio_WormsDone.xlsx")
+
+# Read each sheet to see the structure
+bio_sheet1 <- read_excel("Bio_WormsDone.xlsx", sheet = 1)
+bio_sheet2 <- read_excel("Bio_WormsDone.xlsx", sheet = 2)
+
+# Look at the first few rows
+head(bio_sheet1)
+head(bio_sheet2)
+
+# Look at column names
+names(bio_sheet1)
+names(bio_sheet2)
+
+# ================================================================
+# EXPLORE env.xlsx
+# ================================================================
+
+# Look at the "station Done" sheet
+env_data <- read_excel("env.xlsx", sheet = "station done")
+
+# Look at structure
+head(env_data)
+names(env_data)
+
+# Print the structure so you can tell me what columns you have
+str(bio_sheet1)
+str(bio_sheet2)
+str(env_data)
+```
+
+```{r load data for shannon }
+
+# ================================================================
+# STEP 1: READ AND COMBINE BIOLOGICAL DATA
+# ================================================================
+
+# Read both sheets (2024 and 2023 data)
+bio_2024 <- read_excel("Bio_WormsDone.xlsx", sheet = "Bio_RealNames_Worms2024")
+bio_2023 <- read_excel("Bio_WormsDone.xlsx", sheet = "2023")
+
+# Add a Year column to track which year each sample is from
+bio_2024$Year <- 2024
+bio_2023$Year <- 2023
+
+# Combine both years - keep only the columns that exist in both sheets
+bio_data <- bind_rows(
+  bio_2024 %>% select(Station, espece, Nb_individu, poids, Year, 
+                      ScientificName_accepted),
+  bio_2023 %>% select(Station, espece, Nb_individu, poids, Year) %>%
+    mutate(ScientificName_accepted = espece)  # Use espece as scientific name for 2023
+)
+
+# Check the combined data
+cat("Total rows after combining:", nrow(bio_data), "\n")
+cat("Rows from 2024:", sum(bio_data$Year == 2024), "\n")
+cat("Rows from 2023:", sum(bio_data$Year == 2023), "\n")
+
+# ================================================================
+# STEP 2: CLEAN THE DATA
+# ================================================================
+
+# Remove rows where Nb_individu is NA (these are fragments/pieces, not countable individuals)
+cat("\nRows with NA abundance:", sum(is.na(bio_data$Nb_individu)), "\n")
+
+bio_data_clean <- bio_data %>%
+  filter(!is.na(Nb_individu)) %>%  # Remove NA abundances
+  filter(Nb_individu > 0)           # Keep only positive abundances
+
+cat("Rows after removing NAs:", nrow(bio_data_clean), "\n")
+
+# Check which stations we have
+unique_stations <- unique(bio_data_clean$Station)
+cat("\nNumber of unique stations:", length(unique_stations), "\n")
+
+# ================================================================
+# STEP 3: HANDLE DUPLICATES (if any)
+# ================================================================
+
+# Check for duplicate Station-Species combinations
+duplicates <- bio_data_clean %>%
+  group_by(Station, ScientificName_accepted) %>%
+  summarise(n = n(), .groups = "drop") %>%
+  filter(n > 1)
+
+if(nrow(duplicates) > 0) {
+  cat("\nFound", nrow(duplicates), "duplicate Station-Species combinations\n")
+  cat("Summing abundances for duplicates...\n")
+  
+  # Sum abundances for duplicates
+  bio_data_clean <- bio_data_clean %>%
+    group_by(Station, ScientificName_accepted, Year) %>%
+    summarise(
+      Nb_individu = sum(Nb_individu, na.rm = TRUE),
+      poids = sum(poids, na.rm = TRUE),
+      .groups = "drop"
+    )
+} else {
+  cat("\nNo duplicates found - data is clean!\n")
+}
+
+# ================================================================
+# STEP 4: CREATE COMMUNITY MATRIX (Station x Species)
+# ================================================================
+
+# Create wide format matrix for Shannon calculation
+community_wide <- bio_data_clean %>%
+  select(Station, ScientificName_accepted, Nb_individu) %>%
+  pivot_wider(
+    names_from = ScientificName_accepted,
+    values_from = Nb_individu,
+    values_fill = 0  # Fill missing with 0
+  )
+
+# Convert to matrix format for vegan
+stations <- community_wide$Station
+community_matrix <- as.data.frame(community_wide[, -1])
+rownames(community_matrix) <- stations
+
+# Check dimensions
+cat("\nCommunity matrix dimensions:\n")
+cat("Stations:", nrow(community_matrix), "\n")
+cat("Species:", ncol(community_matrix), "\n")
+
+# ================================================================
+# STEP 5: CALCULATE SHANNON INDEX
+# ================================================================
+
+# Calculate Shannon diversity index
+shannon_values <- diversity(community_matrix, index = "shannon")
+
+# Calculate other useful metrics
+richness <- specnumber(community_matrix)  # Number of species
+total_abundance <- rowSums(community_matrix)  # Total individuals
+
+# Create results dataframe
+shannon_df <- data.frame(
+  Station = names(shannon_values),
+  Shannon_Index = as.numeric(shannon_values),
+  Species_Richness = as.numeric(richness),
+  Total_Abundance = as.numeric(total_abundance)
+)
+
+# Summary
+cat("\n========================================\n")
+cat("SHANNON INDEX SUMMARY:\n")
+cat("========================================\n")
+cat("Number of stations:", nrow(shannon_df), "\n")
+cat("Mean Shannon Index:", round(mean(shannon_df$Shannon_Index), 3), "\n")
+cat("Min Shannon Index:", round(min(shannon_df$Shannon_Index), 3), "\n")
+cat("Max Shannon Index:", round(max(shannon_df$Shannon_Index), 3), "\n")
+cat("Mean Species Richness:", round(mean(shannon_df$Species_Richness), 1), "\n")
+
+# ================================================================
+# STEP 6: READ COORDINATES
+# ================================================================
+
+coord_data <- read_excel("env.xlsx", sheet = "station done")
+
+# Select and rename relevant columns
+coord_data <- coord_data %>%
+  select(
+    Station,
+    Latitude = lat,
+    Longitude = long,
+    Sector = secteur,
+    Depth,
+    Chla,
+    Phaeo
+  )
+
+cat("\nCoordinate data loaded:", nrow(coord_data), "stations\n")
+
+# ================================================================
+# STEP 7: ADD YEAR INFORMATION
+# ================================================================
+
+# Get year for each station from bio_data
+station_years <- bio_data_clean %>%
+  select(Station, Year) %>%
+  distinct()
+
+# Some stations might have data from both years - take the most common year
+station_years <- station_years %>%
+  group_by(Station) %>%
+  summarise(Year = max(Year), .groups = "drop")  # Take most recent year if duplicates
+
+# ================================================================
+# STEP 8: MERGE EVERYTHING
+# ================================================================
+
+# Merge Shannon indices with coordinates
+final_data <- shannon_df %>%
+  left_join(coord_data, by = "Station") %>%
+  left_join(station_years, by = "Station")
+
+# Check for stations without coordinates
+missing_coords <- final_data %>%
+  filter(is.na(Longitude) | is.na(Latitude))
+
+if(nrow(missing_coords) > 0) {
+  cat("\nWARNING:", nrow(missing_coords), "stations missing coordinates:\n")
+  print(missing_coords$Station)
+  
+  # Remove stations without coordinates
+  final_data <- final_data %>%
+    filter(!is.na(Longitude) & !is.na(Latitude))
+}
+
+cat("\nFinal dataset:", nrow(final_data), "stations with complete data\n")
+
+# ================================================================
+# STEP 9: CONVERT TO SPATIAL OBJECT
+# ================================================================
+
+# Create sf object (assuming coordinates are in WGS84 lat/lon)
+benthic_sf <- st_as_sf(final_data, 
+                       coords = c("Longitude", "Latitude"),
+                       crs = 4326)  # WGS84
+
+# Transform to UTM Zone 19N (appropriate for Saguenay)
+benthic_sf <- st_transform(benthic_sf, crs = 32619)
+
+# ================================================================
+# STEP 10: SAVE YOUR RESULTS
+# ================================================================
+
+# Save as CSV (with coordinates as separate columns)
+final_data_export <- final_data %>%
+  arrange(Station)
+
+write.csv(final_data_export, "benthic_data_complete.csv", row.names = FALSE)
+
+# Save as shapefile
+st_write(benthic_sf, "benthic_stations.shp", delete_dsn = TRUE)
+
+# Save as R object (fastest for later use)
+saveRDS(benthic_sf, "benthic_data.rds")
+
+# Also save the raw bio data for reference
+write.csv(bio_data_clean, "bio_data_clean.csv", row.names = FALSE)
+
+cat("\nFiles saved:\n")
+cat("- benthic_data_complete.csv\n")
+cat("- benthic_stations.shp\n")
+cat("- benthic_data.rds\n")
+cat("- bio_data_clean.csv\n")
+
+# ================================================================
+# STEP 11: VISUALIZATIONS
+# ================================================================
+
+# 1. Histogram of Shannon Index
+par(mfrow = c(2, 2))
+
+hist(final_data$Shannon_Index, 
+     breaks = 20,
+     col = "lightblue",
+     main = "Distribution of Shannon Index",
+     xlab = "Shannon Index")
+
+# 2. Shannon vs Species Richness
+plot(final_data$Species_Richness, final_data$Shannon_Index,
+     pch = 16, col = "darkblue",
+     xlab = "Species Richness",
+     ylab = "Shannon Index",
+     main = "Diversity Metrics")
+abline(lm(Shannon_Index ~ Species_Richness, data = final_data), 
+       col = "red", lwd = 2)
+
+# 3. Shannon by Sector
+if("Sector" %in% names(final_data)) {
+  boxplot(Shannon_Index ~ Sector, data = final_data,
+          col = "lightgreen",
+          main = "Shannon Index by Sector",
+          las = 2)
+}
+
+# 4. Shannon by Year
+if("Year" %in% names(final_data)) {
+  boxplot(Shannon_Index ~ Year, data = final_data,
+          col = c("orange", "cyan"),
+          main = "Shannon Index by Year")
+}
+
+par(mfrow = c(1, 1))
+
+# 5. Spatial map
+plot(benthic_sf["Shannon_Index"], 
+     pch = 16, 
+     cex = 2,
+     main = "Shannon Index - Saguenay Fjord",
+     key.pos = 4)
+
+# ================================================================
+# STEP 12: SUMMARY TABLE BY SECTOR
+# ================================================================
+
+if("Sector" %in% names(final_data)) {
+  summary_by_sector <- final_data %>%
+    group_by(Sector) %>%
+    summarise(
+      N_stations = n(),
+      Mean_Shannon = round(mean(Shannon_Index), 3),
+      SD_Shannon = round(sd(Shannon_Index), 3),
+      Mean_Richness = round(mean(Species_Richness), 1),
+      Mean_Abundance = round(mean(Total_Abundance), 0)
+    )
+  
+  cat("\n========================================\n")
+  cat("SUMMARY BY SECTOR:\n")
+  cat("========================================\n")
+  print(summary_by_sector)
+}
+
+# ================================================================
+# STEP 13: SUMMARY TABLE BY YEAR
+# ================================================================
+
+if("Year" %in% names(final_data)) {
+  summary_by_year <- final_data %>%
+    group_by(Year) %>%
+    summarise(
+      N_stations = n(),
+      Mean_Shannon = round(mean(Shannon_Index), 3),
+      SD_Shannon = round(sd(Shannon_Index), 3),
+      Mean_Richness = round(mean(Species_Richness), 1)
+    )
+  
+  cat("\n========================================\n")
+  cat("SUMMARY BY YEAR:\n")
+  cat("========================================\n")
+  print(summary_by_year)
+}
+
+# ================================================================
+# FINAL DATA PREVIEW
+# ================================================================
+
+cat("\n========================================\n")
+cat("FINAL DATASET PREVIEW:\n")
+cat("========================================\n")
+print(head(final_data, 10))
+
+cat("\nColumn names in final dataset:\n")
+print(names(final_data))
+```
+
+
